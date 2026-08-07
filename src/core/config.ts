@@ -25,8 +25,13 @@ export const REASONING_CATEGORIES = [
 
 export type ReasoningCategory = (typeof REASONING_CATEGORIES)[number];
 
-const DEFAULT_MODEL = 'claude-sonnet-5';
-const CHEAP_MODEL = 'claude-haiku-4-5-20251001';
+/** Strategic reasoning. The strongest model, because goal selection and
+ *  replanning are where agent quality actually shows. */
+const DEFAULT_MODEL = 'claude-opus-5';
+/** Summarisation and classification — high volume, low difficulty. Routing
+ *  these away from the strong model is the single biggest cost lever
+ *  (requirement 26's "memory summarization → inexpensive model"). */
+const CHEAP_MODEL = 'claude-haiku-4-5';
 
 const simulationSchema = z.object({
   scenario: z.string().default('first-settlement'),
