@@ -62,6 +62,15 @@ export interface EventPayloads {
     reason: string;
   };
   resource_deposited: { agentId: AgentId; settlementId: SettlementId; resources: ResourceBundle };
+  /** The other direction: a builder drawing shared materials out of the store.
+   *  Recorded because every ledger mutation must be explained by an event
+   *  (ADR-0004) — otherwise the settlement's economy stops reconciling. */
+  resource_withdrawn: {
+    agentId: AgentId;
+    settlementId: SettlementId;
+    resources: ResourceBundle;
+    reason: string;
+  };
 
   // ── Goals and plans ───────────────────────────────────────────────────────
   goal_created: { agentId: AgentId; goalId: GoalId; kind: string; reason: string; priority: number };
@@ -162,6 +171,7 @@ export const DEFAULT_IMPORTANCE: Readonly<Record<EventType, Importance>> = {
   resource_spent: 0.2,
   resource_transferred: 0.6,
   resource_deposited: 0.3,
+  resource_withdrawn: 0.3,
 
   goal_created: 0.4,
   goal_completed: 0.6,
