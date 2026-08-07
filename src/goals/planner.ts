@@ -24,6 +24,7 @@ import {
 } from '../agents/needs.ts';
 import type { GoalId, IdFactory, PlanId } from '../core/ids.ts';
 import {
+  bundleGet,
   bundleShortfall,
   expandRegion,
   horizontalDistance,
@@ -59,6 +60,9 @@ export interface PlanningContext {
   readonly claimedWork: readonly string[];
   /** Structures the settlement already has. */
   readonly existingStructures: readonly string[];
+  /** The settlement's shared store, or null when nothing is founded yet. Public
+   *  by definition, so reading it is not reaching into anyone's private state. */
+  readonly sharedStore: ResourceBundle | null;
   /**
    * The settlement work this agent should take on, already weighed against the
    * public claims of everyone else (requirement 18). Null when there is no
@@ -165,9 +169,18 @@ export function ruleGoalChoice(context: PlanningContext): GoalChoice {
   // the materials are short.
   const wanted = nextStructure(context.existingStructures);
   if (wanted !== null) {
+    // The personal answer to "the settlement needs X" is "I gather for it" only
+    // when the shared store hasn't already covered it. All five settlers chasing
+    // the same shortfall at once is how a thirty-day run ended with 148,000 wood
+    // and one hut: the colony has a wood problem, not a shelter problem.
+    const sharedMissing =
+      context.sharedStore === null
+        ? null
+        : RESOURCE_KINDS.find((kind) => bundleShortfall(costOf(wanted), context.sharedStore!)[kind]! > 0);
+
     const shortfall = bundleShortfall(costOf(wanted), context.carrying);
     const missing = RESOURCE_KINDS.find((kind) => (shortfall[kind] ?? 0) > 0);
-    if (missing !== undefined) {
+    if (missing !== undefined && sharedMissing !== null) {
       return {
         goal: 'gather_resource',
         reason: `the ${wanted} needs ${String(shortfall[missing])} more ${missing}`,
@@ -207,6 +220,21 @@ export function ruleGoalChoice(context: PlanningContext): GoalChoice {
 }
 
 function shelterGoal(context: PlanningContext, reason: string): GoalChoice {
+  // Someone else has already taken on building a roof. Supplying them beats
+  // starting a rival hut on the same flat patch: five settlers who each answer
+  // "I need shelter" with "so I shall build one" spend the run fighting over the
+  // same ground, which is what a 400-round run did — 44 of its last 50 failures
+  // were settlers colliding on one reservation.
+  //
+  // Note what this deliberately does *not* do: send the agent to a shelter that
+  // already stands. Tried that, and all five converged on one hut, stopped
+  // exploring, and starved — the settlement collapsed into a single point. A
+  // personal need is answered by working toward shelter, not by everyone walking
+  // to the same door.
+  const someoneIsBuilding = context.claimedWork.some(
+    (claim) => claim === 'build_structure' || claim.startsWith('build:'),
+  );
+
   const cost = costOf('small_shelter');
   const shortfall = bundleShortfall(cost, context.carrying);
   const missing = RESOURCE_KINDS.find((kind) => (shortfall[kind] ?? 0) > 0);
@@ -220,6 +248,36 @@ function shelterGoal(context: PlanningContext, reason: string): GoalChoice {
       priority: 0.85,
       resource: missing,
       quantity: Math.min(256, shortfall[missing] ?? 1),
+      blueprint: null,
+    };
+  }
+
+  if (someoneIsBuilding) {
+    // Gather toward the cost and put it in the shared store — help that is an
+    // outcome, not a sentiment. A bare "deposit what you're carrying" goal was
+    // tried here and does nothing: it fires only when the agent is already
+    // carrying the cost (the gather case returns earlier), and the deposit
+    // executor only hands materials to a project this agent has *claimed*, which
+    // it hasn't. So the useful version of this choice is the gather version.
+    if (context.settlementCenter !== null) {
+      const gathering = RESOURCE_KINDS.find((kind) => bundleGet(context.carrying, kind) > 0);
+      if (gathering !== undefined) {
+        return {
+          goal: 'gather_resource',
+          reason: `${reason}, and someone is already building one — better to stock the shared store than to compete`,
+          priority: 0.8,
+          resource: gathering,
+          quantity: Math.min(256, Math.max(24, bundleGet(context.carrying, gathering))),
+          blueprint: null,
+        };
+      }
+    }
+    return {
+      goal: 'assist_agent',
+      reason: `${reason}, and someone is already building one — better to offer help than to compete`,
+      priority: 0.8,
+      resource: null,
+      quantity: null,
       blueprint: null,
     };
   }

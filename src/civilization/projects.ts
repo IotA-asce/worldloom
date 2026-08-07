@@ -226,6 +226,10 @@ export const RESOURCE_SKILL: Readonly<Record<ResourceKind, Skill>> = {
 /** How much one pair of hands is worth fetching, before a second is wanted. */
 const HANDS_PER_UNIT = 48;
 const MAX_HANDS_PER_RESOURCE = 3;
+/** The most one agent should set out to carry back in one journey. Asking a
+ *  settler for 256 wood is a logging career, not an errand — and a hoard that
+ *  large sits in one inventory doing the settlement no good. */
+const MAX_FETCH = 64;
 
 /** Every role on a project, taken or not. */
 export function rolesOf(store: Store, progress: ProjectProgress): RoleSlot[] {
@@ -259,7 +263,7 @@ export function rolesOf(store: Store, progress: ProjectProgress): RoleSlot[] {
       skill: RESOURCE_SKILL[kind],
       goal: kind === 'food' ? 'find_food' : 'gather_resource',
       resource: kind,
-      quantity: Math.min(256, Math.max(1, Math.ceil(short / capacity))),
+      quantity: Math.min(MAX_FETCH, Math.max(1, Math.ceil(short / capacity))),
       blueprint: null,
       detail: `${what} needs ${short} more ${kind}`,
     });
@@ -300,7 +304,7 @@ export function rolesOf(store: Store, progress: ProjectProgress): RoleSlot[] {
       quantity:
         canStart || scarcest === null
           ? null
-          : Math.min(256, Math.max(1, bundleGet(progress.shortfall, scarcest))),
+          : Math.min(MAX_FETCH, Math.max(1, bundleGet(progress.shortfall, scarcest))),
       blueprint,
       detail: canStart
         ? `${what} is paid for and wants building`

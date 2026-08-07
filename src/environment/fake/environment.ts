@@ -64,6 +64,9 @@ const MATERIAL_BLOCKS: Readonly<Record<BuildMaterial, FakeBlock>> = {
  * not clairvoyance — and shallow enough that ore must still be dug for.
  */
 const PERCEPTION_DEPTH = 6;
+/** The same limits the router uses, so what it plans is what the world allows. */
+const WALK_STEP_UP = 1;
+const WALK_STEP_DOWN = 4;
 
 export interface FakeEnvironmentOptions {
   readonly seed?: number;
@@ -196,7 +199,7 @@ export class FakeEnvironment implements Environment {
     // Terrain-following steering, shared with the Minecraft adapter. The agent
     // walks around a rise but cannot cross a cliff — which is what keeps its
     // position honest (ADR-0003).
-    const walked = traverse(agent.position, to, (x, z) => this.walkableHeight(x, z));
+    const walked = traverse(agent.position, to, (x, z, fromY) => this.walkableHeight(x, z, fromY));
 
     if (walked.blockedAt !== null) {
       return fail('PATH_BLOCKED', 'impassable terrain immediately ahead', {
@@ -216,13 +219,33 @@ export class FakeEnvironment implements Environment {
     };
   }
 
-  /** Ground level at a column, or null where an agent cannot stand. */
-  private walkableHeight(x: number, z: number): number | null {
+  /**
+   * Ground level at a column as reachable from `fromY`, or null where an agent
+   * cannot stand.
+   *
+   * A floor near the walker's own elevation with room above it beats the
+   * topmost solid block. Without that, the roof of a hut *is* the ground for
+   * every column of it — so five settlers who walked inside to sleep found every
+   * neighbouring column four blocks up and were sealed in by the shelter they
+   * built. A run showed exactly that: all five at one coordinate, walled in.
+   */
+  private walkableHeight(x: number, z: number, fromY: number): number | null {
+    const feetFrom = Math.floor(fromY);
+    for (let feet = feetFrom + WALK_STEP_UP; feet >= feetFrom - WALK_STEP_DOWN; feet--) {
+      const floor = this.world.blockAt({ x, y: feet - 1, z });
+      if (!floor.solid) continue;
+      // Standing in water is not walking.
+      if (floor.surface === 'water') return null;
+      // Feet and head both need room; a doorway has exactly that, a wall does not.
+      if (this.world.blockAt({ x, y: feet, z }).solid) continue;
+      if (this.world.blockAt({ x, y: feet + 1, z }).solid) continue;
+      return feet - 1;
+    }
+
+    // No floor within a step of the walker: fall back to the open surface, which
+    // is the right answer for ordinary terrain a long way above or below.
     const y = this.world.surfaceHeight(x, z);
-    const surface = this.world.blockAt({ x, y, z }).surface;
-    // Standing in water is not walking.
-    if (surface === 'water') return null;
-    return y;
+    return this.world.blockAt({ x, y, z }).surface === 'water' ? null : y;
   }
 
   async harvest(

@@ -22,7 +22,7 @@ import type { Observation } from '../environment/port.ts';
 import type { ReasoningProvider } from '../reasoning/provider.ts';
 import { type WorldloomConfig } from '../core/config.ts';
 import { describeFailure, ok, type ActionFailure, type Result } from '../core/result.ts';
-import { formatPosition, type WorldTime } from '../core/world.ts';
+import { formatPosition, type ResourceBundle, type WorldTime } from '../core/world.ts';
 import { executeStep } from '../goals/actions.ts';
 import {
   canTransition,
@@ -57,7 +57,7 @@ import {
   requestHelp,
 } from '../civilization/coordination.ts';
 import { releaseClaimsBy } from '../civilization/projects.ts';
-import { settlementCenter, standingStructureTypes } from '../civilization/settlement.ts';
+import { settlementCenter, settlementStock, standingStructureTypes } from '../civilization/settlement.ts';
 import { agentOwner } from '../persistence/repositories/ledger.ts';
 import { OBSERVED } from '../memory/types.ts';
 import { placeTag, retrieve, retrievedContents, retrievedIds } from '../memory/retrieval.ts';
@@ -73,7 +73,8 @@ const GOAL_SYSTEM_PROMPT = [
   'Do not choose work another settler has already claimed unless nothing else is useful.',
 ].join(' ');
 
-/** Ticks a single step may spend making partial progress before it is stalled. */
+/** Ticks a step making *partial progress* may spend before it counts as stalled.
+ *  Held states (resting) are exempt — see the `heldState` check where it is used. */
 const MAX_STEP_CONTINUATIONS = 8;
 
 const RECOVERY_SYSTEM_PROMPT = [
@@ -201,11 +202,16 @@ export async function tickAgent(agentId: Agent['id'], deps: TickDeps): Promise<R
   // ── RECORD ────────────────────────────────────────────────────────────────
   if (outcome.ok && outcome.value.incomplete === true) {
     // Progress without completion: keep the step current and carry on next tick.
-    // Bounded, so a step that inches along forever still eventually fails.
     const result = outcome.value;
     const attempts = plan.steps[step.index]?.attempts ?? 0;
 
-    if (attempts >= MAX_STEP_CONTINUATIONS) {
+    // A state held over time — resting, waiting — is not *stalled* progress, so
+    // it is not bounded the way travel is. Resting until recovered may honestly
+    // take days of world time; calling the eighth tick of it a blockage turns
+    // "sleeping" into a pathfinding failure and replans the agent out of bed.
+    const heldState = step.action === 'rest';
+
+    if (!heldState && attempts >= MAX_STEP_CONTINUATIONS) {
       const stalled: ActionFailure = {
         kind: 'PATH_BLOCKED',
         detail: `still not there after ${attempts} attempts`,
@@ -765,6 +771,7 @@ function planningContext(
     memories: retrievedContents(retrieved),
     claimedWork: claimedWork(agent, deps),
     existingStructures: standingStructureTypes(deps.store),
+    sharedStore: sharedStore(deps.store),
     work: chooseWork(coordinationContext(deps.store, agent, time)),
     sheltered: observation.sheltered,
     hostilesNearby: observation.nearbyEntities.filter((entity) => entity.hostile).length,
@@ -857,6 +864,7 @@ function planningContextFromStore(agent: Agent, time: WorldTime, deps: TickDeps)
     memories: [],
     claimedWork: claimedWork(agent, deps),
     existingStructures: standingStructureTypes(deps.store),
+    sharedStore: sharedStore(deps.store),
     work: chooseWork(coordinationContext(deps.store, agent, time)),
     sheltered: agent.needs.shelter > 0.9,
     hostilesNearby: 0,
@@ -870,11 +878,39 @@ function planningContextFromStore(agent: Agent, time: WorldTime, deps: TickDeps)
  * goal is the agent's own reasoning about what it is doing, and reading that
  * would be reaching into another mind (ADR-0007).
  */
+/** The settlement's shared store, or null before anything is founded. */
+function sharedStore(store: TickDeps['store']): ResourceBundle | null {
+  const founded = store.settlements.primary();
+  return founded === null ? null : settlementStock(store, founded.id);
+}
+
 function claimedWork(agent: Agent, deps: TickDeps): string[] {
-  return deps.store.projects
+  const claimed = deps.store.projects
     .allClaims()
     .filter((claim) => claim.agentId !== agent.id)
     .map((claim) => claim.role);
+
+  // Goals in progress count too. Claims cover only coordinated work, and an
+  // uncoordinated settler raising their own shelter files none — so everyone
+  // else concluded nobody was building and started one of their own, which is
+  // how five settlers ended up fighting over the same reserved patch.
+  const underway = deps.store.db
+    .prepare(`SELECT kind, params FROM goals WHERE state = 'active' AND agent_id <> ?`)
+    .all(agent.id)
+    .map((row) => {
+      const kind = String(row.kind);
+      if (kind !== 'build_structure') return kind;
+      // Say *what* is being built, the way a claim does, so the planner can
+      // tell "someone is building a shelter" from "someone is building".
+      try {
+        const params = JSON.parse(String(row.params)) as { blueprint?: string };
+        return params.blueprint === undefined ? kind : `build:${params.blueprint}`;
+      } catch {
+        return kind;
+      }
+    });
+
+  return [...new Set([...claimed, ...underway])].sort();
 }
 
 function emptyReport(agent: Agent, note: string | null): TickReport {
