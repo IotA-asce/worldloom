@@ -69,6 +69,19 @@ export interface CostSummary {
   readonly failures: number;
 }
 
+/**
+ * Decision counts grouped by the two columns that say where an answer came
+ * from: the category asked and the model that answered. `withResponse` counts
+ * the rows that stored a model response, which is what separates a genuine
+ * model answer from a rule answer the model call fell back to.
+ */
+export interface DecisionCount {
+  readonly category: ReasoningCategory;
+  readonly model: string;
+  readonly decisions: number;
+  readonly withResponse: number;
+}
+
 const EMPTY_SUMMARY: CostSummary = {
   calls: 0,
   inputTokens: 0,
@@ -134,6 +147,100 @@ export class DecisionRepository {
       .map(toDecision);
   }
 
+  countForAgent(agentId: AgentId): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM decisions WHERE agent_id = ?').get(agentId);
+    return row === undefined ? 0 : numberCol(row, 'n');
+  }
+
+  /** Decisions that named this event as their outcome. */
+  forEvent(eventId: EventId): DecisionRecord[] {
+    return this.db
+      .prepare('SELECT * FROM decisions WHERE event_id = ? ORDER BY world_ticks ASC')
+      .all(eventId)
+      .map(toDecision);
+  }
+
+  /**
+   * The decision this agent had most recently made at a given tick.
+   *
+   * Needed because a decision is recorded before the events it causes exist, so
+   * `event_id` is often null and the link has to be reconstructed from world
+   * time (ADR-0008's "consequences" direction).
+   */
+  latestAtOrBefore(agentId: AgentId, worldTicks: number): DecisionRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM decisions WHERE agent_id = ? AND world_ticks <= ?
+          ORDER BY world_ticks DESC LIMIT 1`,
+      )
+      .get(agentId, worldTicks);
+    return row === undefined ? null : toDecision(row);
+  }
+
+  /** The next decision this agent made after a tick — the end of the previous
+   *  decision's window of responsibility. */
+  firstAfter(agentId: AgentId, worldTicks: number): DecisionRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM decisions WHERE agent_id = ? AND world_ticks > ?
+          ORDER BY world_ticks ASC LIMIT 1`,
+      )
+      .get(agentId, worldTicks);
+    return row === undefined ? null : toDecision(row);
+  }
+
+  countsByCategoryAndModel(): DecisionCount[] {
+    return this.db
+      .prepare(
+        `SELECT category, model,
+                COUNT(*) AS decisions,
+                COALESCE(SUM(CASE WHEN response IS NOT NULL THEN 1 ELSE 0 END), 0) AS with_response
+           FROM decisions
+          GROUP BY category, model
+          ORDER BY decisions DESC`,
+      )
+      .all()
+      .map((row) => ({
+        category: textCol(row, 'category') as ReasoningCategory,
+        model: textCol(row, 'model'),
+        decisions: numberCol(row, 'decisions'),
+        withResponse: numberCol(row, 'with_response'),
+      }));
+  }
+
+  /** How many decisions each agent has made. The honest per-agent activity
+   *  measure, since `llm_calls` is not always attributed to an agent. */
+  countsByAgent(): Map<AgentId, number> {
+    const out = new Map<AgentId, number>();
+    for (const row of this.db
+      .prepare('SELECT agent_id, COUNT(*) AS n FROM decisions GROUP BY agent_id')
+      .all()) {
+      out.set(textCol(row, 'agent_id') as AgentId, numberCol(row, 'n'));
+    }
+    return out;
+  }
+
+  countsByDay(): Map<number, number> {
+    const out = new Map<number, number>();
+    for (const row of this.db
+      .prepare('SELECT day, COUNT(*) AS n FROM decisions GROUP BY day ORDER BY day')
+      .all()) {
+      out.set(numberCol(row, 'day'), numberCol(row, 'n'));
+    }
+    return out;
+  }
+
+  /**
+   * Whether this world stored prompt text at all (`record_decisions`).
+   *
+   * Without it, a row whose response is null is ambiguous — the model may have
+   * answered and the text simply not been kept. Knowing which world we are
+   * looking at is what keeps the fallback report from over-claiming.
+   */
+  textRecorded(): boolean {
+    return this.db.prepare('SELECT 1 FROM decisions WHERE prompt IS NOT NULL LIMIT 1').get() !== undefined;
+  }
+
   count(): number {
     const row = this.db.prepare('SELECT COUNT(*) AS n FROM decisions').get();
     return row === undefined ? 0 : numberCol(row, 'n');
@@ -174,7 +281,7 @@ export class LlmCallRepository {
 
   /** Whole-run totals. Checked against the configured budget each tick. */
   total(): CostSummary {
-    return this.summarise('SELECT', '');
+    return this.summarise('');
   }
 
   byCategory(): Map<ReasoningCategory, CostSummary> {
@@ -189,6 +296,11 @@ export class LlmCallRepository {
     return this.grouped('day');
   }
 
+  /** Spend per model — the routing lever of requirement 26 made measurable. */
+  byModel(): Map<string, CostSummary> {
+    return this.grouped('model');
+  }
+
   recent(limit = 20): LlmCallRecord[] {
     return this.db
       .prepare('SELECT * FROM llm_calls ORDER BY created_at DESC LIMIT ?')
@@ -196,7 +308,24 @@ export class LlmCallRepository {
       .map(toLlmCall);
   }
 
-  private summarise(_verb: string, where: string, params: readonly (string | number)[] = []): CostSummary {
+  /** Calls that failed. Each one is a tick where a rule answered instead of the
+   *  model, which a long run should not be doing silently. */
+  recentFailures(limit = 20): LlmCallRecord[] {
+    return this.db
+      .prepare('SELECT * FROM llm_calls WHERE ok = 0 ORDER BY created_at DESC LIMIT ?')
+      .all(Math.max(1, Math.floor(limit)))
+      .map(toLlmCall);
+  }
+
+  /** Calls with no agent attached. The usage callback that meters the provider
+   *  does not know which agent it is answering for, so this is normally the whole
+   *  run — see `costView`, which reports it rather than guessing. */
+  unattributedCalls(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM llm_calls WHERE agent_id IS NULL').get();
+    return row === undefined ? 0 : numberCol(row, 'n');
+  }
+
+  private summarise(where: string, params: readonly (string | number)[] = []): CostSummary {
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS calls,
@@ -217,8 +346,8 @@ export class LlmCallRepository {
     };
   }
 
-  /** `column` is never user input — only the three literals above. */
-  private grouped(column: 'category' | 'agent_id' | 'day'): Map<string, CostSummary> {
+  /** `column` is never user input — only the four literals above. */
+  private grouped(column: 'category' | 'agent_id' | 'day' | 'model'): Map<string, CostSummary> {
     const rows = this.db
       .prepare(
         `SELECT ${column} AS key,

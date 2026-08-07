@@ -147,6 +147,24 @@ export class MemoryRepository {
       .map(toMemory);
   }
 
+  /**
+   * What this agent remembers of one event. Usually none or one, but a single
+   * event can leave both an episodic trace and a relationship note.
+   *
+   * This closes the last link of the causal chain: event → memory (ADR-0008).
+   * Still agent-scoped, so it cannot be used to read what *another* settler made
+   * of the same event.
+   */
+  forEvent(agentId: AgentId, eventId: EventId): MemoryEntry[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM memories WHERE agent_id = ? AND event_id = ?
+          ORDER BY created_at_ticks ASC`,
+      )
+      .all(agentId, eventId)
+      .map(toMemory);
+  }
+
   byType(agentId: AgentId, type: MemoryType, limit = 50): MemoryEntry[] {
     return this.db
       .prepare(
