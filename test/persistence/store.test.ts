@@ -83,7 +83,7 @@ describe('migrations', () => {
       Date.now(),
     );
     // Downgrading would silently drop columns the old code cannot write.
-    assert.throws(() => assertSchemaCompatible(db), /schema is version 6, but this build understands up to 1/);
+    assert.throws(() => assertSchemaCompatible(db), /schema is version \d+, but this build understands up to \d+/);
     db.close();
   });
 

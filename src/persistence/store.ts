@@ -11,6 +11,12 @@ import { randomIdFactory, type IdFactory } from '../core/ids.ts';
 import { openDatabase, type Database } from './db.ts';
 import { assertSchemaCompatible, migrate } from './migrations.ts';
 import { AgentRepository } from './repositories/agents.ts';
+import {
+  ChronicleRepository,
+  ProjectRepository,
+  SettlementRepository,
+  StructureRepository,
+} from './repositories/civilization.ts';
 import { EventRepository } from './repositories/events.ts';
 import { GoalRepository, PlanRepository } from './repositories/goals.ts';
 import { KnowledgeRepository, MessageRepository } from './repositories/knowledge.ts';
@@ -44,6 +50,12 @@ export class Store {
   readonly decisions: DecisionRepository;
   readonly llmCalls: LlmCallRepository;
 
+  /** Civilization-level state: public facts, not anyone's beliefs (ADR-0007). */
+  readonly settlements: SettlementRepository;
+  readonly structures: StructureRepository;
+  readonly projects: ProjectRepository;
+  readonly chronicle: ChronicleRepository;
+
   private constructor(db: Database, options: StoreOptions) {
     this.db = db;
     this.ids = options.ids ?? randomIdFactory();
@@ -59,6 +71,11 @@ export class Store {
     this.ledger = new LedgerRepository(db);
     this.decisions = new DecisionRepository(db, this.ids, options.recordDecisionText ?? true);
     this.llmCalls = new LlmCallRepository(db, this.ids);
+
+    this.settlements = new SettlementRepository(db);
+    this.structures = new StructureRepository(db);
+    this.projects = new ProjectRepository(db);
+    this.chronicle = new ChronicleRepository(db);
   }
 
   /** Open (creating if needed) and migrate to the current schema version. */
