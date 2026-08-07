@@ -113,6 +113,13 @@ export interface EnvironmentInfo {
   readonly elevationRange: { readonly min: number; readonly max: number };
   /** Largest region the adapter will survey in one call. */
   readonly maxSurveyCells: number;
+  /**
+   * How far an agent can sensibly perceive here. The environment owns this
+   * because it depends on the medium — a piloted body sees less than a
+   * server-side survey — and the core must not have to ask what kind of world
+   * it is in to decide.
+   */
+  readonly observationRadius: number;
 }
 
 export interface Environment {
@@ -167,6 +174,40 @@ export interface Environment {
    * (ADR-0003). Presentation only: failure must not stop the simulation.
    */
   presentAgent(agent: AgentView): Promise<Result<void>>;
+}
+
+
+/**
+ * Bound an observation's resource list without losing scarce-but-vital kinds.
+ *
+ * Capping a globally-sorted list drops food behind hundreds of soil and stone
+ * clusters, so an agent starves standing next to berries. Keeping the best few
+ * of *each* kind bounds the total just as well and guarantees that anything
+ * present is visible.
+ */
+export function boundVisibleResources(
+  clusters: readonly VisibleResource[],
+  perKind = 3,
+  total = 16,
+): VisibleResource[] {
+  const byKind = new Map<ResourceKind, VisibleResource[]>();
+  for (const cluster of [...clusters].sort((a, b) => b.estimatedQuantity - a.estimatedQuantity)) {
+    const bucket = byKind.get(cluster.resource) ?? [];
+    if (bucket.length < perKind) {
+      bucket.push(cluster);
+      byKind.set(cluster.resource, bucket);
+    }
+  }
+
+  // Interleave the kinds so the cap can't starve whichever sorts last.
+  const out: VisibleResource[] = [];
+  for (let rank = 0; rank < perKind; rank++) {
+    for (const bucket of byKind.values()) {
+      const cluster = bucket[rank];
+      if (cluster !== undefined && out.length < total) out.push(cluster);
+    }
+  }
+  return out.sort((a, b) => b.estimatedQuantity - a.estimatedQuantity);
 }
 
 /** Fraction of a built structure that must verify for it to count as complete. */

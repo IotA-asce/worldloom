@@ -13,6 +13,15 @@ import { MinecraftEnvironment } from './minecraft/adapter.ts';
 import { BridgeClient } from './minecraft/bridge-client.ts';
 import type { Environment } from './port.ts';
 
+/**
+ * World ticks the fake environment advances per observation.
+ *
+ * Chosen so a settler acts several times per Minecraft hour — fast enough that a
+ * demo reaches nightfall in minutes, slow enough that agents can finish a job
+ * between meals.
+ */
+const FAKE_TICKS_PER_OBSERVATION = 40;
+
 export interface EnvironmentHandle {
   readonly environment: Environment;
   /** Close underlying transports. Safe to call more than once. */
@@ -21,7 +30,13 @@ export interface EnvironmentHandle {
 
 export function createEnvironment(config: WorldloomConfig): EnvironmentHandle {
   if (config.environment.type === 'fake') {
-    const environment = new FakeEnvironment({ seed: config.simulation.seed });
+    const environment = new FakeEnvironment({
+      seed: config.simulation.seed,
+      // The fake world has no clock of its own, so one has to be provided:
+      // without it world time never advances, needs never decay, and a
+      // day-bounded run never finishes.
+      ticksPerQuery: FAKE_TICKS_PER_OBSERVATION,
+    });
     return {
       environment,
       close: () => environment.disconnect(),

@@ -35,6 +35,7 @@ import {
 } from '../../core/world.ts';
 import { isDaylight, phaseOf, TICKS_PER_DAY } from '../../persistence/repositories/simulation.ts';
 import {
+  boundVisibleResources,
   BUILD_COMPLETION_THRESHOLD,
   verificationSampleSize,
   type BlockInfo,
@@ -69,6 +70,9 @@ const MAX_SURVEY_CELLS = 16_384;
 /** Terrain an agent can traverse in one step. */
 const MAX_STEP_UP = 1;
 const MAX_STEP_DOWN = 4;
+
+/** How far below the surface to expect rock. */
+const SUBSURFACE_ROCK_DEPTH = 5;
 
 /** Hostile entity types worth reacting to. */
 const HOSTILE_TYPES = new Set([
@@ -119,6 +123,9 @@ export class MinecraftEnvironment implements Environment {
       embodiment: this.embodiment,
       elevationRange: { min: MIN_ELEVATION, max: MAX_ELEVATION },
       maxSurveyCells: MAX_SURVEY_CELLS,
+      // A piloted body perceives its immediate surroundings; a logical agent
+      // reads a wider survey, because that is what the bridge makes cheap.
+      observationRadius: this.embodiment === 'piloted' ? 24 : 32,
     };
   }
 
@@ -556,20 +563,42 @@ export class MinecraftEnvironment implements Environment {
   private visibleResources(survey: TerrainSurvey): VisibleResource[] {
     // Cluster by surface kind on a 16-block grid, so agents perceive "woodland
     // to the north" rather than hundreds of individual blocks.
+    // Canopy reads as vegetation from a heightmap, so a forest would otherwise
+    // advertise only fibre and agents could never find timber. Cells standing
+    // clear of the surrounding ground are treated as trees — an inference the
+    // harvest then verifies by probing for trunks and reading blocks back.
+    const median = medianElevation(survey.cells);
+
     const clusters = new Map<string, { resource: ResourceKind; position: Position; count: number }>();
-    for (const cell of survey.cells) {
-      const resource = resourceFromSurface(cell.surface);
-      if (resource === null) continue;
+
+    const note = (resource: ResourceKind, at: Position, cell: SurveyCell): void => {
       const key = `${resource}:${Math.floor(cell.x / 16)},${Math.floor(cell.z / 16)}`;
       const existing = clusters.get(key);
       if (existing === undefined) {
-        clusters.set(key, { resource, position: { x: cell.x, y: cell.y, z: cell.z }, count: 1 });
+        clusters.set(key, { resource, position: at, count: 1 });
       } else {
         existing.count++;
       }
+    };
+
+    for (const cell of survey.cells) {
+      const canopy = cell.surface === 'vegetation' && cell.y > median + 2;
+      const surfaceResource = canopy ? 'wood' : resourceFromSurface(cell.surface);
+      if (surfaceResource !== null) {
+        note(surfaceResource, { x: cell.x, y: cell.y, z: cell.z }, cell);
+      }
+
+      // There is rock under dry land. That is common knowledge rather than
+      // clairvoyance, and the harvest verifies it by reading blocks back — but
+      // without saying so, stone is invisible from a heightmap and nothing that
+      // needs masonry can ever be built. Ore stays hidden: it lies far deeper
+      // than this, and must be dug for.
+      if (cell.surface !== 'water' && cell.surface !== 'stone') {
+        note('stone', { x: cell.x, y: cell.y - SUBSURFACE_ROCK_DEPTH, z: cell.z }, cell);
+      }
     }
 
-    return [...clusters.values()]
+    const ranked = [...clusters.values()]
       .map((cluster) => ({
         resource: cluster.resource,
         position: cluster.position,
@@ -580,6 +609,10 @@ export class MinecraftEnvironment implements Environment {
             : cluster.count * survey.resolution,
       }))
       .sort((a, b) => b.estimatedQuantity - a.estimatedQuantity);
+
+    // Bounded per kind for the same reason as the fake environment: observations
+    // are rendered into prompts (requirement 29).
+    return boundVisibleResources(ranked);
   }
 
   private async nearbyEntities(
@@ -829,6 +862,13 @@ export class MinecraftEnvironment implements Environment {
 
 /** Prefix distinguishing Worldloom agent markers from ordinary armour stands. */
 export const MARKER_PREFIX = 'wl:';
+
+/** Median elevation of a survey, used to tell a canopy from flat ground. */
+function medianElevation(cells: readonly SurveyCell[]): number {
+  if (cells.length === 0) return 0;
+  const sorted = [...cells].map((cell) => cell.y).sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)]!;
+}
 
 /** Which resource a normalised surface kind implies, for cheap wide sensing. */
 function resourceFromSurface(surface: SurfaceKind): ResourceKind | null {

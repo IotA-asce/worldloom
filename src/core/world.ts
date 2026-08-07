@@ -70,7 +70,10 @@ export const MATERIAL_COST: Readonly<Record<BuildMaterial, ResourceBundle>> = {
   packed_soil: { soil: 1 },
   thatch: { fiber: 1 },
   glass: { sand: 1 },
-  light: { coal: 1, wood: 1 },
+  // A torch or fire is wood here. Pricing it in coal would gate every structure
+  // that wants light behind deep mining, which makes a first-night shelter
+  // impossible to build — see the day-one shelter in civilization/blueprints.ts.
+  light: { wood: 1 },
   door: { wood: 2 },
   // Clearing space costs nothing and yields nothing we bother to track.
   empty: {},

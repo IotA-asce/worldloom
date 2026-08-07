@@ -146,7 +146,7 @@ describe('replanning by insertion', () => {
 
     // The harvest needs a journey first — insert it ahead of the current step.
     plan = insertStepsBefore(plan, 1, [
-      makeStep(0, 'travel_to', { destination: { x: 120, y: 70, z: -40 } }),
+      makeStep(0, 'travel_to', { target: { kind: 'position', position: { x: 120, y: 70, z: -40 } } }),
     ]);
 
     assert.equal(plan.steps.length, 4);
@@ -164,7 +164,7 @@ describe('replanning by insertion', () => {
 
   it('bumps the revision each time, so the audit trail is ordered', () => {
     let plan = makePlan();
-    plan = insertStepsBefore(plan, 0, [makeStep(0, 'rest', { ticks: 100 })]);
+    plan = insertStepsBefore(plan, 0, [makeStep(0, 'rest', { untilEnergy: 0.9 })]);
     plan = insertStepsBefore(plan, 0, [makeStep(0, 'eat', { amount: 1 })]);
     assert.equal(plan.revision, 2);
   });

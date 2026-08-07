@@ -19,17 +19,40 @@ repository scaffold, test harness, CI.
 
 **Done when:** `npm run typecheck && npm test` pass on a clean clone.
 
-### M1 — One persistent agent
+### M1 — One persistent agent *(done)*
 
 The vertical slice: domain model, SQLite repositories, `Environment` port with
 both `FakeEnvironment` and `MinecraftEnvironment`, bridge client, reasoning
 provider abstraction with the heuristic implementation, needs, goals, plans,
-deterministic executor, event ledger, tick state machine.
+deterministic executors, event ledger, tick state machine, CLI.
 
-**Done when:** one agent observes a live Minecraft world, forms a goal, builds a
-structured plan, performs a real verified world mutation, stores the experience
-as memory, and — after `kill` and restart — resumes the same plan at the same
-step.
+**Done when:** one agent observes a world, forms a goal, builds a structured
+plan, performs a real verified world mutation, stores the experience as memory,
+and — after the process is thrown away — resumes the same plan at the same step.
+
+All of that passes, plus more than the milestone asked for: agents gather
+verified resources, choose sites, and build and verify structures. Bugs the
+milestone flushed out and their fixes are worth recording, because several were
+the kind that make a simulation look like it works when it doesn't:
+
+- Agents forgot their goal every tick (the post-action write rebuilt the agent
+  from a pre-action snapshot), so they re-decided constantly instead of pursuing
+  anything.
+- Replanning regenerated an identical plan, so a failing goal looped forever.
+  Plans now differ by attempt, and goals are abandoned after a bounded number.
+- A failed harvest corrected the wrong coordinates, so agents never learned a
+  deposit was empty and walked back to it repeatedly.
+- Forests advertised only leaves and open ground only grass, so timber and stone
+  were invisible and nothing could ever be built.
+- The first shelter required coal for a torch — reachable only by deep mining —
+  making a first-night shelter impossible.
+- Bounding an observation by total quantity let abundant soil crowd out scarce
+  food, so agents starved beside berry bushes.
+
+**Known gaps at the end of M1**, deliberately left for their own milestones:
+five agents each build their own shelter rather than one together (M4's
+coordination), and food supply is tight enough that agents spend a lot of the
+day foraging (M5's economy tuning).
 
 ### M2 — Memory
 

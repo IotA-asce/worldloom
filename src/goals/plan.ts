@@ -36,10 +36,25 @@ export const ACTION_KINDS = [
 
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
+/**
+ * A travel destination that may be resolved at execution time from the agent's
+ * own knowledge.
+ *
+ * This matters for legibility as much as for mechanics: a plan step reading
+ * "travel toward the nearest known forest" stays meaningful, whereas one holding
+ * coordinates captured at planning time silently goes stale when the agent
+ * learns of somewhere better — or when the deposit turns out to be exhausted.
+ */
+export type TravelTarget =
+  | { readonly kind: 'position'; readonly position: Position }
+  | { readonly kind: 'resource'; readonly resource: ResourceKind }
+  | { readonly kind: 'location'; readonly location: string };
+
 export interface ActionParams {
   survey_area: { region: Region; resolution?: number };
-  travel_to: { destination: Position };
+  travel_to: { target: TravelTarget };
   locate_resource: { resource: ResourceKind; searchRadius: number };
+  /** `from` is resolved from the agent's known resources when absent. */
   harvest_resource: { resource: ResourceKind; quantity: number; from?: Region };
   select_site: { blueprint: string; near?: Position; searchRadius: number };
   reserve_region: { region: Region };
@@ -49,7 +64,8 @@ export interface ActionParams {
   release_region: { region: Region };
   deposit_resources: { resource?: ResourceKind };
   send_message: { toAgentId: AgentId; content: string };
-  rest: { ticks: number };
+  /** Rest until energy reaches this level. Held across ticks, not instant. */
+  rest: { untilEnergy: number };
   eat: { amount: number };
 }
 

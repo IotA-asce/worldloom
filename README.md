@@ -11,9 +11,17 @@ Minecraft is the first environment Worldloom plugs into. It is not what
 Worldloom is about; it is simply somewhere visible for these processes to
 happen.
 
-> **Status: M0 — architecture.** The design is settled and documented; the
-> runtime is being built. Nothing here simulates a civilization yet. See
-> [docs/v0-plan.md](docs/v0-plan.md) for exactly what exists and what doesn't.
+> **Status: M1 — the vertical slice runs.** Agents observe a world, set
+> themselves goals, plan, gather verified resources, build and verify
+> structures, remember what happened, replan when they fail, and resume after a
+> restart. It runs against an in-memory world with no API key
+> (`npm test`), and against a live Minecraft server via `minecraft-mcp`.
+>
+> Not yet done: memory consolidation and reflection (M2), the concurrent
+> scheduler, messaging and relationships (M3), settlement projects and
+> coordination (M4) — five agents currently each build their own shelter instead
+> of one together — and the chronicle (M6). See
+> [docs/v0-plan.md](docs/v0-plan.md).
 
 ## Why it exists
 
@@ -138,16 +146,33 @@ npm run dev -- costs                # tokens and spend by category and agent
 
 The shape V0 is built to produce (illustrative — not a recorded run):
 
-```
-Day 6 · Aurelian Reach · population 5
+Real output from a rule-based run (no model calls), lightly trimmed:
 
-Structures    communal shelter, storage building, small farm
-Recent        Arun discovered an iron deposit at (142, 68, -91)
-              Arun informed Mira
-              Mira created project: workshop
-              Elias became hungry and abandoned timber collection
-              Nadia shared food with Elias  →  trust Nadia→Elias +6
 ```
+Aurelian Reach founded — Establish a self-sustaining settlement
+  Arun (Explorer) arrived        ... Mira (Builder), Nadia (Forager),
+                                     Elias (Gatherer), Sam (Miner)
+
+Sam decided to gather 60 wood — the settlement still has no permanent
+  shelter, and I need 60 more wood to build one
+Sam: found wood near (-79, 73, -62)
+Sam: travelled 79 blocks
+Sam: gathered 60 wood (verified from 16 samples)
+Sam decided to gather 25 stone — ... I need 25 more stone to build one
+Sam: gathered 25 stone (verified from 25 samples)
+Sam: chose a site at (-64, 68, -8)
+Sam: claimed the site
+Sam: cleared 80 blocks of ground
+Sam: built the shelter at (-64, 68, -8)
+Sam: the shelter stands, verified from 19 samples
+
+Mira failed: [RESOURCE_UNAVAILABLE] no food visible within 80 blocks → replan
+Mira: ate 4 food
+```
+
+Every number there is real: the 60 wood was credited from blocks confirmed
+removed from the world, the shelter cost exactly those resources from Mira's
+ledger, and the failure genuinely reached the planner.
 
 ```
 CHRONICLE
