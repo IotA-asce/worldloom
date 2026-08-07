@@ -25,7 +25,8 @@
     "test": "node --no-warnings=ExperimentalWarning --import tsx --test \"test/**/*.test.ts\"",
     "test:watch": "node --no-warnings=ExperimentalWarning --import tsx --test --watch \"test/**/*.test.ts\"",
     "dev": "node --no-warnings=ExperimentalWarning --import tsx src/cli/index.ts",
-    "start": "node --no-warnings=ExperimentalWarning dist/cli/index.js"
+    "start": "node --no-warnings=ExperimentalWarning dist/cli/index.js",
+    "smoke:minecraft": "node --no-warnings=ExperimentalWarning --import tsx scripts/smoke-minecraft.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",

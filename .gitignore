@@ -17,3 +17,6 @@ config.local.yaml
 
 .DS_Store
 *.log
+
+# Subagent worktrees — never part of the repo
+.claude/worktrees/
