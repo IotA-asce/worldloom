@@ -204,7 +204,9 @@ describe('event ledger', () => {
     store.agents.insert(makeAgent());
     const actor = 'agent_000001' as AgentId;
 
-    store.events.append({ type: 'resource_discovered', actorId: actor, payload: { agentId: actor, resource: 'iron', at: position(142, 68, -91), estimatedQuantity: 12 } }, { day: 3, worldTicks: 72_000 });
+    // Importance is stated explicitly: this test is about query filtering, and
+    // should not break when a type's default importance is retuned.
+    store.events.append({ type: 'resource_discovered', actorId: actor, importance: 0.7, payload: { agentId: actor, resource: 'iron', at: position(142, 68, -91), estimatedQuantity: 12 } }, { day: 3, worldTicks: 72_000 });
     store.events.append({ type: 'agent_moved', actorId: actor, payload: { agentId: actor, from: position(0, 0, 0), to: position(1, 0, 0) } }, { day: 3, worldTicks: 72_100 });
     store.events.append({ type: 'day_began', actorId: null, payload: { day: 4 } }, { day: 4, worldTicks: 96_000 });
 

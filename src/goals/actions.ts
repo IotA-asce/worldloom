@@ -21,12 +21,16 @@ import type { Agent } from '../agents/agent.ts';
 import { agentView, clamp01 } from '../agents/agent.ts';
 import { structureTypeOf } from '../civilization/blueprints.ts';
 import { findBlueprint } from '../civilization/blueprints.ts';
+import { applyStructureCompleted } from '../civilization/settlement.ts';
+import { tell } from '../agents/messaging.ts';
+import { completeProjectsFor, contribute, withdrawForBuild } from '../civilization/projects.ts';
 import type { StructureId } from '../core/ids.ts';
 import { fail, ok, type Result } from '../core/result.ts';
 import {
   blueprintCost,
   blueprintRegion,
   bundleGet,
+  bundleIsEmpty,
   formatBundle,
   formatPosition,
   horizontalDistance,
@@ -177,6 +181,16 @@ async function locateResource(
     );
   }
 
+  // Has the settlement ever known of this resource? Asked of the ledger rather
+  // than of another agent's mind — a `resource_discovered` event is public
+  // history, not private belief. One sweep can reveal four seams at once, so the
+  // flag is consumed by the first event it marks: a first strike is one moment in
+  // history, not four.
+  let firstOfItsKind =
+    ctx.store.events
+      .query({ types: ['resource_discovered'] })
+      .every((event) => (event.payload as { resource?: string }).resource !== params.resource);
+
   const events: NewEvent[] = [];
   ctx.store.transaction(() => {
     for (const visible of found.slice(0, 4)) {
@@ -205,18 +219,85 @@ async function locateResource(
             at: visible.position,
             estimatedQuantity: visible.estimatedQuantity,
           },
+          // The settlement's first knowledge of a resource is a genuine
+          // milestone; a later find of something already known is routine. Both
+          // are recorded, but only the first is offered to history.
+          ...(firstOfItsKind ? { importance: 0.85 } : {}),
         });
+        firstOfItsKind = false;
       }
     }
     appendAll(ctx, events);
   });
 
   const best = found[0]!;
+  const told = shareDiscovery(ctx, params.resource, best, events.length > 0);
+
   return ok({
-    note: `found ${params.resource} near ${formatPosition(best.position)}`,
+    note:
+      told === null
+        ? `found ${params.resource} near ${formatPosition(best.position)}`
+        : `found ${params.resource} near ${formatPosition(best.position)} and told ${told}`,
     agentPatch: { status: 'exploring', activity: `looking for ${params.resource}` },
   });
 }
+
+/**
+ * Pass on a genuinely new find to someone nearby.
+ *
+ * This is how knowledge spreads at all (requirement 10). Without it agents only
+ * ever learn by looking, `knowledge_shared` never fires in a real run, and the
+ * only relationship movement is the negative kind from competing over ground —
+ * which makes the social layer look broken when it is merely unused.
+ *
+ * It happens here rather than as its own goal because that is how people behave:
+ * you call out "there's iron over here" while you are standing on it, you do not
+ * form an intention to hold a meeting about it later.
+ */
+function shareDiscovery(
+  ctx: Ctx,
+  resource: ResourceKind,
+  found: { position: Position; estimatedQuantity: number },
+  wasNews: boolean,
+): string | null {
+  // Only real news, and only if this settler is the sort to mention it.
+  if (!wasNews) return null;
+  if (ctx.agent.personality.sociability < 0.35) return null;
+
+  // Tell whoever is nearest — the only agent this one can see well enough to
+  // speak to. Position is public; their beliefs are not.
+  let nearest: { id: typeof ctx.agent.id; name: string } | null = null;
+  let bestDistance = TALKING_DISTANCE;
+  for (const other of ctx.store.agents.living()) {
+    if (other.id === ctx.agent.id) continue;
+    const distance = horizontalDistance(ctx.agent.position, other.position);
+    if (distance <= bestDistance) {
+      bestDistance = distance;
+      nearest = { id: other.id, name: other.name };
+    }
+  }
+  if (nearest === null) return null;
+
+  const sent = tell(
+    { store: ctx.store, time: ctx.time },
+    {
+      fromAgentId: ctx.agent.id,
+      toAgentId: nearest.id,
+      intent: {
+        kind: 'discovery',
+        subject: `${resource} near ${formatPosition(found.position)}`,
+        at: found.position,
+        resource,
+        estimatedQuantity: found.estimatedQuantity,
+      },
+    },
+  );
+
+  return sent.ok ? nearest.name : null;
+}
+
+/** How far away someone can still be told something. */
+const TALKING_DISTANCE = 48;
 
 // ── Movement ────────────────────────────────────────────────────────────────
 
@@ -549,6 +630,26 @@ async function placeBlueprint(
   const cost = blueprintCost(blueprint);
   const owner = agentOwner(ctx.agent.id);
 
+  // Draw the price from the settlement's stores first, if this agent holds the
+  // building claim on a project for exactly this structure. Without it the
+  // gatherers fill a store nobody can spend, and a builder can only ever raise
+  // what she fetched herself — which defeats the point of shared projects.
+  if (!ctx.store.ledger.canAfford(owner, cost)) {
+    const claim = ctx.store.projects
+      .claimsBy(ctx.agent.id)
+      .find((held) => held.role === 'building');
+    if (claim !== undefined) {
+      const project = ctx.store.projects.find(claim.projectId);
+      if (project !== null && project.blueprint === params.blueprint) {
+        withdrawForBuild(ctx.store, {
+          projectId: project.id,
+          agentId: ctx.agent.id,
+          time: { day: ctx.time.day, worldTicks: ctx.time.totalTicks },
+        });
+      }
+    }
+  }
+
   // Check before building: an agent cannot raise a wall out of resources it
   // never gathered (ADR-0004). This failure is what sends the planner back to
   // gathering rather than letting the build silently succeed.
@@ -640,23 +741,53 @@ async function verifyStructure(
     });
   }
 
-  const structureId = ctx.store.ids.next('struct') as StructureId;
   const type = structureTypeOf(params.blueprint);
 
+  // Somebody may already have finished this exact structure — five settlers who
+  // each adopted a build goal before the first one landed will all verify the
+  // same walls. Recording a second row would give the settlement thirty-nine
+  // shelters at one address and a chronicle full of phantom construction, so an
+  // existing structure is *joined* instead: the agent is added as a builder.
+  const already = ctx.store.structures
+    .overlapping(verified.value.region)
+    .find((candidate) => candidate.type === type && candidate.state === 'complete');
+
+  if (already !== null && already !== undefined) {
+    ctx.store.structures.addBuilder(already.id, ctx.agent.id);
+    ctx.store.knowledge.rememberLocation({
+      agentId: ctx.agent.id,
+      position: regionCenter(already.region),
+      kind: locationKindFor(type),
+      confidence: 1,
+      source: OBSERVED,
+      label: type,
+      discoveredAtDay: ctx.time.day,
+      lastSeenAtTicks: ctx.time.totalTicks,
+    });
+    return ok({
+      note: `the ${type} was already standing — I helped finish it`,
+      agentPatch: { status: 'idle', activity: `worked on the ${type}` },
+    });
+  }
+
+  const structureId = ctx.store.ids.next('struct') as StructureId;
+
   ctx.store.transaction(() => {
-    appendAll(ctx, [
-      {
-        type: 'structure_completed',
-        actorId: ctx.agent.id,
-        payload: {
-          structureId,
-          type,
-          region: verified.value.region,
-          builders: [ctx.agent.id],
-          purpose: purposeOf(type),
-        },
-      },
-    ]);
+    const payload = {
+      structureId,
+      type,
+      region: verified.value.region,
+      builders: [ctx.agent.id],
+      purpose: purposeOf(type),
+    };
+    appendAll(ctx, [{ type: 'structure_completed', actorId: ctx.agent.id, payload }]);
+
+    // Fold it into the settlement's own record, and close whatever project
+    // wanted it — otherwise the settlement never learns it has a shelter and
+    // keeps asking for one.
+    const context = { day: ctx.time.day, worldTicks: ctx.time.totalTicks };
+    const structure = applyStructureCompleted(ctx.store, payload, context);
+    completeProjectsFor(ctx.store, structure, context);
 
     // The agent now knows there is shelter here — which is what lets a later
     // "seek shelter" goal actually go somewhere.
@@ -686,9 +817,28 @@ async function depositResources(ctx: Ctx): Promise<Result<StepOutcome>> {
   if (RESOURCE_KINDS.every((kind) => bundleGet(balance, kind) === 0)) {
     return ok({ note: 'nothing to deposit', skipped: true });
   }
-  // Settlement-level stores arrive with the settlement record; until then an
-  // agent keeps what it gathered.
-  return ok({ note: `holding ${formatBundle(balance)}`, skipped: true });
+
+  // Hand what was gathered to whichever project this agent is working on. This
+  // is the step that turns several settlers gathering into one shelter rather
+  // than five private hoards.
+  const context = { day: ctx.time.day, worldTicks: ctx.time.totalTicks };
+  const claims = ctx.store.projects.claimsBy(ctx.agent.id);
+
+  for (const claim of claims) {
+    const given = contribute(ctx.store, {
+      projectId: claim.projectId,
+      agentId: ctx.agent.id,
+      time: context,
+    });
+    if (given.ok && !bundleIsEmpty(given.value.applied)) {
+      return ok({
+        note: `contributed ${formatBundle(given.value.applied)} to the settlement`,
+        agentPatch: { activity: 'delivering supplies' },
+      });
+    }
+  }
+
+  return ok({ note: `holding ${formatBundle(balance)} with nowhere to put it`, skipped: true });
 }
 
 async function sendMessage(

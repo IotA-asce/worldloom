@@ -12,7 +12,8 @@ import type { WorldloomConfig } from './core/config.ts';
 import { createRng, type Rng } from './core/rng.ts';
 import { randomIdFactory, type IdFactory } from './core/ids.ts';
 import { ok, type Result } from './core/result.ts';
-import type { Position } from './core/world.ts';
+import type { SettlementId } from './core/ids.ts';
+import type { Position, WorldTime } from './core/world.ts';
 import { createEnvironment, type EnvironmentHandle } from './environment/index.ts';
 import type { Environment } from './environment/port.ts';
 import { createLogger, silentLogger, type Logger } from './observability/logger.ts';
@@ -20,6 +21,13 @@ import { Store } from './persistence/store.ts';
 import { createReasoningProvider } from './reasoning/index.ts';
 import type { ReasoningProvider } from './reasoning/provider.ts';
 import { foundSettlement, SETTLEMENT_OBJECTIVE } from './scenarios/first-settlement.ts';
+import { establishSettlement, reconcileSettlementState } from './civilization/settlement.ts';
+import { applyRelationshipEffects, catchUpRelationships } from './civilization/relationships.ts';
+import {
+  completeFundedStockpiles,
+  proposeProjects,
+  reconcileProjects,
+} from './civilization/projects.ts';
 
 export interface SimulationOptions {
   readonly config: WorldloomConfig;
@@ -46,6 +54,15 @@ export class Simulation {
   /** Shared with the provider's usage callback, which is built before the
    *  Simulation exists — hence a small box rather than a field. */
   private readonly spend: { usd: number };
+  private settlementId: SettlementId | null = null;
+  /**
+   * How far relationships have been folded forward.
+   *
+   * Held in memory rather than a column: relationship values are cumulative, and
+   * a restart runs `catchUpRelationships` over the gap, so there is nothing a
+   * persisted watermark would buy that a schema change would not cost.
+   */
+  private relationshipSeq = 0;
   private stopping = false;
 
   private constructor(parts: {
@@ -159,6 +176,13 @@ export class Simulation {
 
     if (resuming) {
       const agents = this.store.agents.all();
+      // The settlement tables are a projection of the ledger, so a restart
+      // catches them up rather than trusting they were left consistent.
+      reconcileSettlementState(this.store);
+      reconcileProjects(this.store);
+      // Opinions formed while the process was gone still have to form.
+      catchUpRelationships(this.store, this.relationshipSeq, worldTime);
+      this.relationshipSeq = this.store.events.latestSeq();
       this.store.events.appendAll(
         [
           {
@@ -225,6 +249,18 @@ export class Simulation {
       });
     }
 
+    // The scenario founds the settlement as an event; this gives it the row that
+    // projects and structures hang off.
+    const context = { day: worldTime.day, worldTicks: worldTime.totalTicks };
+    const settlement = establishSettlement(this.store, {
+      name: setup.settlementName,
+      objective: SETTLEMENT_OBJECTIVE,
+      center: setup.center,
+      time: context,
+    });
+    this.settlementId = settlement.id;
+    proposeProjects(this.store, { settlementId: settlement.id, time: context });
+
     this.logger.info(`${setup.settlementName} founded — ${SETTLEMENT_OBJECTIVE}`);
     for (const agent of setup.agents) {
       this.logger.info(`  ${agent.name} (${agent.role}) arrived`);
@@ -251,7 +287,24 @@ export class Simulation {
       });
       if (report.ok) reports.push(report.value);
     }
+
+    this.foldRelationships();
     return reports;
+  }
+
+  /**
+   * Turn this round's events into changes of opinion.
+   *
+   * Done once per round rather than inside a tick, because how Nadia feels about
+   * Elias is a consequence of what happened, not of whose turn it is — and
+   * folding per-agent would apply the same event several times over.
+   */
+  private foldRelationships(): void {
+    const latest = this.store.events.latestSeq();
+    if (latest <= this.relationshipSeq) return;
+    const fresh = this.store.events.query({ sinceSeq: this.relationshipSeq });
+    this.relationshipSeq = latest;
+    applyRelationshipEffects(this.store, fresh, this.store.simulation.currentTime());
   }
 
   /** Run until `maxDays` elapses, or until stopped. */
@@ -270,6 +323,7 @@ export class Simulation {
           [{ type: 'day_began', actorId: null, payload: { day: now.day } }],
           { day: now.day, worldTicks: now.totalTicks },
         );
+        this.reviewProjects(now);
         this.logger.info(`— Day ${now.day} —`);
       }
 
@@ -282,6 +336,23 @@ export class Simulation {
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
       }
     }
+  }
+
+  /**
+   * Decide what the settlement should be working on, once a day.
+   *
+   * Both calls are idempotent and cheap, so a day boundary is the natural place:
+   * often enough that a settlement reacts to what it now lacks, rarely enough
+   * that agents get a stable set of roles to organise around rather than a
+   * board that reshuffles under them mid-job.
+   */
+  private reviewProjects(now: WorldTime): void {
+    const settlementId = this.settlementId ?? this.store.settlements.primary()?.id ?? null;
+    if (settlementId === null) return;
+    this.settlementId = settlementId;
+    const context = { day: now.day, worldTicks: now.totalTicks };
+    completeFundedStockpiles(this.store, context);
+    proposeProjects(this.store, { settlementId, time: context });
   }
 
   stop(): void {

@@ -85,8 +85,16 @@ function seededStore(): Store {
     0,
   );
   // Day 2: a discovery and a routine move, only one of which is history.
+  // Marked as a first strike, which is what the executor does for the
+  // settlement's first knowledge of a resource — later finds of something
+  // already known are routine and deliberately do not reach history.
   store.events.append(
-    { type: 'resource_discovered', actorId: ARUN, payload: SAMPLE_PAYLOADS.resource_discovered },
+    {
+      type: 'resource_discovered',
+      actorId: ARUN,
+      importance: 0.85,
+      payload: SAMPLE_PAYLOADS.resource_discovered,
+    },
     { day: 2, worldTicks: 200 },
     0,
   );

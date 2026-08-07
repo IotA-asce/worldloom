@@ -24,6 +24,7 @@ import { position, type WorldTime } from '../src/core/world.ts';
 import { FakeEnvironment } from '../src/environment/fake/environment.ts';
 import { executeStep } from '../src/goals/actions.ts';
 import type { Goal } from '../src/goals/goal.ts';
+import { BASE_THRESHOLD, selectForDay } from '../src/chronicle/importance.ts';
 import { formatSource } from '../src/memory/types.ts';
 import { Store } from '../src/persistence/store.ts';
 import { HeuristicProvider } from '../src/reasoning/heuristic.ts';
@@ -130,6 +131,39 @@ async function discoverCoal(world: World, finder: Agent): Promise<{ position: Re
   return { position: found[0]!.position, estimatedQuantity: found[0]!.estimatedQuantity };
 }
 
+describe('a discovery reaches history only the first time', () => {
+  it('offers the settlement\'s first coal to the chronicle and later finds not at all', async () => {
+    const world = await settled(2, 3);
+    const [finder, second] = world.agents;
+    assert.ok(finder !== undefined && second !== undefined);
+
+    await discoverCoal(world, finder);
+    await discoverCoal(world, second);
+
+    const found = world.store.events.query({ types: ['resource_discovered'] });
+    assert.ok(found.length >= 2, `two agents each looked and found coal: ${String(found.length)}`);
+
+    const first = found[0]!;
+    const later = found[found.length - 1]!;
+    assert.equal(first.importance, 0.85, 'the settlement\'s first coal is a milestone');
+    assert.ok(
+      later.importance < BASE_THRESHOLD,
+      `a second agent re-finding known coal is routine, not history: ${String(later.importance)}`,
+    );
+
+    // Said in the chronicle's own terms: the day's entry is about the strike,
+    // not about every settler who later walked past the same seam.
+    const day = first.day;
+    const selected = selectForDay(day, world.store.events.query({ day })).events;
+    assert.equal(
+      selected.filter((event) => event.type === 'resource_discovered').length,
+      1,
+      'exactly one discovery survives selection',
+    );
+    world.store.close();
+  });
+});
+
 describe('knowledge crosses from one agent to another only by being told', () => {
   it('gives the recipient a coal deposit sourced told_by the agent who found it', async () => {
     const world = await settled();
@@ -173,21 +207,36 @@ describe('knowledge crosses from one agent to another only by being told', () =>
     );
 
     // ── The recipient gains a row it did not have, sourced told_by ───────────
+    // Asserted on *this* deposit rather than on a total: a sociable settler now
+    // passes on finds unprompted while gathering, so the listener may legitimately
+    // have heard about others too. What matters is that this one arrived, and
+    // arrived as hearsay.
     const after = world.store.knowledge.knownResources(listener!.id, 'coal');
-    assert.equal(after.length, 1, 'exactly the one deposit it was told about');
-    assert.equal(formatSource(after[0]!.source), `told_by:${finder!.id}`);
+    const heard = after.find(
+      (known) =>
+        known.position.x === Math.floor(deposit.position.x) &&
+        known.position.z === Math.floor(deposit.position.z),
+    );
+    assert.ok(heard !== undefined, 'the deposit it was told about should have arrived');
+    assert.equal(formatSource(heard.source), `told_by:${finder!.id}`);
     assert.ok(
-      after[0]!.confidence < finderBelief.confidence,
+      heard.confidence < finderBelief.confidence,
       'and it holds the rumour less firmly than the finder holds what it saw',
     );
     assert.equal(drained.outcomes[0]!.wasNews, true);
 
     // ── The crossing is in the ledger ───────────────────────────────────────
+    // The count is not asserted, only that this crossing happened: a sociable
+    // settler also volunteers finds while gathering, so several may be recorded.
     const shared = world.store.events.query({ types: ['knowledge_shared'] });
-    assert.equal(shared.length, 1);
-    const payload = shared[0]!.payload as { fromAgentId: string; toAgentId: string };
-    assert.equal(payload.fromAgentId, finder!.id);
-    assert.equal(payload.toAgentId, listener!.id);
+    assert.ok(shared.length >= 1, 'the crossing should be in the ledger');
+    assert.ok(
+      shared.some((event) => {
+        const payload = event.payload as { fromAgentId: string; toAgentId: string };
+        return payload.fromAgentId === finder!.id && payload.toAgentId === listener!.id;
+      }),
+      'and it should name who told whom',
+    );
 
     await world.environment.disconnect();
   });
@@ -401,8 +450,12 @@ describe('five agents run concurrently', () => {
 
     for (const other of others) {
       const known = world.store.knowledge.knownResources(other.id, 'coal');
-      assert.equal(known.length, 1, `${other.name} should have been told exactly once`);
-      assert.equal(formatSource(known[0]!.source), `told_by:${finder!.id}`);
+      assert.ok(known.length >= 1, `${other.name} should have been told`);
+      // Everything they know about coal is hearsay from the finder — none of them
+      // went and looked, which is the point.
+      for (const rumour of known) {
+        assert.equal(formatSource(rumour.source), `told_by:${finder!.id}`);
+      }
       assert.ok(world.store.knowledge.relationship(other.id, finder!.id)!.trust > 0);
     }
 

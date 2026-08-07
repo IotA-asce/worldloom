@@ -15,13 +15,14 @@
 
 import { agentView, isAlive, type Agent, type TickPhase } from './agent.ts';
 import { updateNeeds, type NeedContext } from './needs.ts';
+import { drainInbox } from './messaging.ts';
 import type { Store } from '../persistence/store.ts';
 import type { Environment } from '../environment/port.ts';
 import type { Observation } from '../environment/port.ts';
 import type { ReasoningProvider } from '../reasoning/provider.ts';
 import { type WorldloomConfig } from '../core/config.ts';
 import { describeFailure, ok, type ActionFailure, type Result } from '../core/result.ts';
-import { formatPosition, type Position, type WorldTime } from '../core/world.ts';
+import { formatPosition, type WorldTime } from '../core/world.ts';
 import { executeStep } from '../goals/actions.ts';
 import {
   canTransition,
@@ -49,6 +50,14 @@ import {
   ruleRecovery,
   type PlanningContext,
 } from '../goals/planner.ts';
+import {
+  applyRecommendation,
+  chooseWork,
+  coordinationContext,
+  requestHelp,
+} from '../civilization/coordination.ts';
+import { releaseClaimsBy } from '../civilization/projects.ts';
+import { settlementCenter, standingStructureTypes } from '../civilization/settlement.ts';
 import { agentOwner } from '../persistence/repositories/ledger.ts';
 import { OBSERVED } from '../memory/types.ts';
 import { placeTag, retrieve, retrievedContents, retrievedIds } from '../memory/retrieval.ts';
@@ -136,11 +145,24 @@ export async function tickAgent(agentId: Agent['id'], deps: TickDeps): Promise<R
   const integrated = integrate(agent, observation.value, time, deps);
   store.agents.update(integrated);
 
+  // Hear what anyone told this agent. Knowledge only spreads by being told
+  // (ADR-0007), so this is the sole channel by which one settler's discovery
+  // becomes another's — and news worth acting on can force a re-decision.
+  const inbox = await drainInbox(integrated.id, {
+    store,
+    reasoning: deps.reasoning,
+    time,
+    ...(deps.log !== undefined ? { log: deps.log } : {}),
+  });
+  const heardSomethingImportant = inbox.ok && inbox.value.shouldReconsider;
+
   // ── ASSESS ────────────────────────────────────────────────────────────────
-  const assessed = assessGoal(integrated, deps);
+  const assessed = heardSomethingImportant
+    ? { goal: null, plan: null }
+    : assessGoal(integrated, deps);
   let goal = assessed.goal;
   let plan = assessed.plan;
-  let reasoned = false;
+  let reasoned = inbox.ok && inbox.value.reasoned;
 
   // ── PLAN ──────────────────────────────────────────────────────────────────
   if (goal === null) {
@@ -418,6 +440,13 @@ async function chooseGoal(
   deps.store.transaction(() => {
     deps.store.goals.insert(active);
     deps.store.plans.insert(plan);
+
+    // Announce the claim only if the agent adopted the work coordination
+    // suggested. A model free to choose otherwise must not leave a claim on the
+    // board for work nobody is doing — a lying board is worse than none.
+    if (context.work !== null && choice.goal === context.work.goal) {
+      applyRecommendation(deps.store, { agent, recommendation: context.work, time });
+    }
     deps.store.events.appendAll(
       [
         {
@@ -505,6 +534,17 @@ async function recoverFrom(
   const observed = failure.observed as { agentPatch?: Partial<Agent> } | undefined;
   if (observed?.agentPatch !== undefined) {
     deps.store.agents.update({ ...agent, ...observed.agentPatch, phase: 'observe' });
+  }
+
+  // A shortfall is worth saying out loud: it is what draws a gatherer, and what
+  // gives the cooperative something to respond to (requirement 18).
+  if (failure.kind === 'RESOURCE_UNAVAILABLE' || failure.kind === 'INSUFFICIENT_RESOURCES') {
+    requestHelp(deps.store, {
+      agent,
+      need: describeGoal(goal),
+      detail: failure.detail,
+      time,
+    });
   }
 
   let failedPlan = failStep(plan, stepIndex, failure);
@@ -628,6 +668,9 @@ function finishGoal(
   deps.store.transaction(() => {
     deps.store.goals.update(moved.value);
     deps.store.plans.update({ ...plan, state: state === 'completed' ? 'completed' : 'failed' });
+    // Whatever the outcome, the agent is no longer on this work — leaving the
+    // claim standing would keep everyone else away from a role nobody is filling.
+    releaseClaimsBy(deps.store, goal.agentId, time.totalTicks);
 
     const event: NewEvent =
       state === 'completed'
@@ -717,11 +760,12 @@ function planningContext(
     time,
     knownResources: deps.store.knowledge.knownResources(agent.id),
     knownShelter: shelter?.position ?? null,
-    settlementCenter: settlementCenter(deps),
+    settlementCenter: settlementCenter(deps.store),
     carrying: deps.store.ledger.balance(agentOwner(agent.id)),
     memories: retrievedContents(retrieved),
     claimedWork: claimedWork(agent, deps),
-    existingStructures: existingStructures(deps),
+    existingStructures: standingStructureTypes(deps.store),
+    work: chooseWork(coordinationContext(deps.store, agent, time)),
     sheltered: observation.sheltered,
     hostilesNearby: observation.nearbyEntities.filter((entity) => entity.hostile).length,
   };
@@ -808,52 +852,29 @@ function planningContextFromStore(agent: Agent, time: WorldTime, deps: TickDeps)
     time,
     knownResources: deps.store.knowledge.knownResources(agent.id),
     knownShelter: shelter?.position ?? null,
-    settlementCenter: settlementCenter(deps),
+    settlementCenter: settlementCenter(deps.store),
     carrying: deps.store.ledger.balance(agentOwner(agent.id)),
     memories: [],
     claimedWork: claimedWork(agent, deps),
-    existingStructures: existingStructures(deps),
+    existingStructures: standingStructureTypes(deps.store),
+    work: chooseWork(coordinationContext(deps.store, agent, time)),
     sheltered: agent.needs.shelter > 0.9,
     hostilesNearby: 0,
   };
 }
 
 /**
- * What other agents are visibly working on.
+ * What other agents have publicly taken on.
  *
- * This is deliberately shallow: goal *kinds*, not other agents' beliefs, plans,
- * or memories. Announced intent is public; a mind is not (ADR-0007).
+ * Project claims, not goal rows. A claim is an announcement anyone may read; a
+ * goal is the agent's own reasoning about what it is doing, and reading that
+ * would be reaching into another mind (ADR-0007).
  */
 function claimedWork(agent: Agent, deps: TickDeps): string[] {
-  const out: string[] = [];
-  for (const goal of deps.store.goals.allActive()) {
-    if (goal.agentId === agent.id) continue;
-    out.push(goal.kind);
-    if (goal.kind === 'build_structure') {
-      const params = goal.params as { blueprint?: string };
-      if (params.blueprint !== undefined) out.push(`build:${params.blueprint}`);
-    }
-  }
-  return out;
-}
-
-/** Structure types the settlement has, from the ledger of completed builds. */
-function existingStructures(deps: TickDeps): string[] {
-  const events = deps.store.events.query({ types: ['structure_completed'] });
-  const types = new Set<string>();
-  for (const event of events) {
-    const payload = event.payload as { type?: string };
-    if (payload.type !== undefined) types.add(payload.type);
-  }
-  return [...types];
-}
-
-/** The settlement's centre, taken from its founding event. */
-function settlementCenter(deps: TickDeps): Position | null {
-  const founded = deps.store.events.query({ types: ['settlement_founded'], limit: 1 })[0];
-  if (founded === undefined) return null;
-  const payload = founded.payload as { center?: Position };
-  return payload.center ?? null;
+  return deps.store.projects
+    .allClaims()
+    .filter((claim) => claim.agentId !== agent.id)
+    .map((claim) => claim.role);
 }
 
 function emptyReport(agent: Agent, note: string | null): TickReport {

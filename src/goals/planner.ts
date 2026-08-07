@@ -35,6 +35,8 @@ import {
   type WorldTime,
 } from '../core/world.ts';
 import { costOf, findBlueprint } from '../civilization/blueprints.ts';
+import { asGoalChoice, type WorkRecommendation } from '../civilization/coordination.ts';
+import { STRUCTURE_SEQUENCE } from '../civilization/settlement.ts';
 import type { KnownResource } from '../memory/types.ts';
 import { GOAL_KINDS, type Goal, type GoalParams } from './goal.ts';
 import { makeStep, type Plan, type PlanStep } from './plan.ts';
@@ -57,6 +59,12 @@ export interface PlanningContext {
   readonly claimedWork: readonly string[];
   /** Structures the settlement already has. */
   readonly existingStructures: readonly string[];
+  /**
+   * The settlement work this agent should take on, already weighed against the
+   * public claims of everyone else (requirement 18). Null when there is no
+   * settlement yet, in which case the agent falls back to its own judgement.
+   */
+  readonly work: WorkRecommendation | null;
   readonly sheltered: boolean;
   readonly hostilesNearby: number;
 }
@@ -135,8 +143,19 @@ export function ruleGoalChoice(context: PlanningContext): GoalChoice {
     };
   }
 
-  // With survival handled, do the most useful settlement work not already
-  // claimed by someone else — the seed of division of labour (requirement 18).
+  // Survival is handled, so what the settlement needs is the question now — and
+  // coordination has already scored the unclaimed roles against this agent's
+  // skills. This is what stops five settlers each building their own shelter.
+  //
+  // Only a *project* role is authoritative. Coordination's `solo` fallbacks mean
+  // "there is no settlement work on offer", which is the absence of an answer
+  // rather than an answer — deferring to it there would leave an agent
+  // exploring forever while the settlement had no shelter, because exploring is
+  // always available and never fails.
+  if (context.work !== null && context.work.kind === 'project') {
+    return asGoalChoice(context.work);
+  }
+
   const shelterExists = context.existingStructures.includes('shelter');
   if (!shelterExists && !context.claimedWork.includes('build_structure')) {
     return shelterGoal(context, 'the settlement still has no permanent shelter');
@@ -170,8 +189,13 @@ export function ruleGoalChoice(context: PlanningContext): GoalChoice {
     }
   }
 
-  // Nothing pressing: explore, which is how the settlement learns about its
-  // surroundings at all. Curious agents prefer this more strongly.
+  // Nothing the settlement needs and nothing pressing: take coordination's solo
+  // suggestion if it has one, since it weighed foraging and helping against
+  // exploring, and fall back to exploring otherwise.
+  if (context.work !== null) return asGoalChoice(context.work);
+
+  // Exploring is how the settlement learns about its surroundings at all.
+  // Curious agents prefer this more strongly.
   return {
     goal: 'explore_region',
     reason: 'there is more of this land to learn',
@@ -210,15 +234,15 @@ function shelterGoal(context: PlanningContext, reason: string): GoalChoice {
   };
 }
 
-/** The next thing a settlement of this maturity should have. */
+/**
+ * The next thing a settlement of this maturity should have.
+ *
+ * The ordering lives in `civilization/settlement.ts` so projects and this
+ * fallback cannot disagree about what the settlement needs next.
+ */
 function nextStructure(existing: readonly string[]): string | null {
-  const order: readonly [string, string][] = [
-    ['shelter', 'small_shelter'],
-    ['storage', 'storage'],
-    ['farm', 'small_farm'],
-  ];
-  for (const [type, blueprint] of order) {
-    if (!existing.includes(type)) return blueprint;
+  for (const step of STRUCTURE_SEQUENCE) {
+    if (!existing.includes(step.type)) return step.blueprint;
   }
   return null;
 }
@@ -301,7 +325,11 @@ export function goalFromChoice(
       return {
         ...base,
         kind: 'assist_agent',
-        params: { agentId: context.agent.id, with: 'their current work' },
+        params: {
+          // Whoever actually asked for help, when coordination named someone.
+          agentId: context.work?.targetAgentId ?? context.agent.id,
+          with: context.work?.role === 'assist' ? 'what they asked for' : 'their current work',
+        },
       };
   }
 }
@@ -365,6 +393,10 @@ function stepsFor(goal: Goal, context: PlanningContext, attempt: number): PlanSt
       steps.push(makeStep(0, 'travel_to', { target: { kind: 'resource', resource: params.resource } }));
       steps.push(
         makeStep(0, 'harvest_resource', { resource: params.resource, quantity: params.quantity }),
+        // Hand it over. Skipped when the agent holds no claim, so a settler
+        // gathering for itself keeps what it found — but a gatherer working a
+        // project stops hoarding, which is what funds shared construction.
+        makeStep(0, 'deposit_resources', { resource: params.resource }),
       );
       return steps;
     }
