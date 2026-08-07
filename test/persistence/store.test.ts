@@ -9,7 +9,7 @@ import {
   STARTING_NEEDS,
   type Agent,
 } from '../../src/agents/agent.ts';
-import { sequentialIdFactory, type AgentId, type GoalId, type MemoryId, type PlanId } from '../../src/core/ids.ts';
+import { sequentialIdFactory, type AgentId, type GoalId, type PlanId } from '../../src/core/ids.ts';
 import { position } from '../../src/core/world.ts';
 import { makeStep, type Plan } from '../../src/goals/plan.ts';
 import type { Goal } from '../../src/goals/goal.ts';
