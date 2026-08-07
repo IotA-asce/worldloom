@@ -158,6 +158,24 @@ export class MemoryRepository {
   }
 
   /**
+   * The newest memories of a type that no belief has been drawn from yet.
+   *
+   * This is the run reflection generalises over, and it has to be ordered by
+   * time rather than by importance: "what has been happening to me lately" is a
+   * temporal question, and `candidates` answers a relevance one.
+   */
+  unconsolidated(agentId: AgentId, type: MemoryType, limit = 24): MemoryEntry[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM memories
+          WHERE agent_id = ? AND type = ? AND consolidated_into IS NULL
+          ORDER BY created_at_ticks DESC, id DESC LIMIT ?`,
+      )
+      .all(agentId, type, Math.max(1, Math.floor(limit)))
+      .map(toMemory);
+  }
+
+  /**
    * Record that memories were used in a decision. Access count and recency feed
    * back into retrieval scoring, so frequently useful memories stay reachable.
    */
@@ -198,14 +216,28 @@ export class MemoryRepository {
 
   /** Drop consolidated memories that have decayed below the floor and were
    *  never re-accessed. True forgetting, bounded so evidence isn't lost early. */
-  forget(agentId: AgentId, importanceBelow: number, olderThanTicks: number): number {
+  forget(
+    agentId: AgentId,
+    importanceBelow: number,
+    olderThanTicks: number,
+    /**
+     * Ids that must survive this call, whatever their importance and age.
+     *
+     * The caller that needs this is consolidation: a memory it has only just
+     * folded into a summary would otherwise be superseded and deleted in the
+     * same breath, leaving a summary whose evidence no longer exists. There is
+     * always a window in which a belief and the memories behind it coexist.
+     */
+    keep: readonly MemoryId[] = [],
+  ): number {
+    const exclusion = keep.length === 0 ? '' : ` AND id NOT IN (${keep.map(() => '?').join(', ')})`;
     const result = this.db
       .prepare(
         `DELETE FROM memories
           WHERE agent_id = ? AND importance < ? AND created_at_ticks < ?
-            AND consolidated_into IS NOT NULL AND access_count = 0`,
+            AND consolidated_into IS NOT NULL AND access_count = 0${exclusion}`,
       )
-      .run(agentId, importanceBelow, olderThanTicks);
+      .run(agentId, importanceBelow, olderThanTicks, ...keep);
     return Number(result.changes);
   }
 
