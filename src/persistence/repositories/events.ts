@@ -47,6 +47,13 @@ export interface EventQuery {
   readonly actorId?: AgentId;
   readonly minImportance?: number;
   readonly limit?: number;
+  /**
+   * Order by sequence descending. This changes *which* rows a limited query
+   * returns, not merely their order: the default ascending order plus a limit
+   * yields the oldest matches, which is the wrong end of the ledger for any
+   * "recently" question.
+   */
+  readonly newestFirst?: boolean;
 }
 
 export class EventRepository {
@@ -136,8 +143,9 @@ export class EventRepository {
 
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     const limit = query.limit === undefined ? '' : `LIMIT ${Math.max(1, Math.floor(query.limit))}`;
+    const direction = query.newestFirst === true ? 'DESC' : 'ASC';
     return this.db
-      .prepare(`SELECT * FROM events ${where} ORDER BY seq ASC ${limit}`)
+      .prepare(`SELECT * FROM events ${where} ORDER BY seq ${direction} ${limit}`)
       .all(...params)
       .map(toEvent);
   }
@@ -147,6 +155,56 @@ export class EventRepository {
     return this.db
       .prepare('SELECT * FROM events ORDER BY seq DESC LIMIT ?')
       .all(Math.max(1, Math.floor(limit)))
+      .map(toEvent);
+  }
+
+  /** The newest events of the given types, newest first. */
+  recentOfTypes(types: readonly EventType[], limit = 20): WorldEvent[] {
+    if (types.length === 0) return [];
+    return this.query({ types, limit, newestFirst: true });
+  }
+
+  /**
+   * What one actor did inside a window of world time, oldest first.
+   *
+   * A decision row records the tick the agent acted on, not the ids of every
+   * event that followed from it (ADR-0008). Tracing a decision to its
+   * consequences therefore means asking what that agent did between that tick
+   * and its next decision.
+   */
+  forActorInTickRange(
+    actorId: AgentId,
+    fromTicks: number,
+    untilTicksExclusive: number | null,
+    limit = 20,
+  ): WorldEvent[] {
+    const clause = untilTicksExclusive === null ? '' : 'AND world_ticks < ?';
+    const params: (string | number)[] = [actorId, fromTicks];
+    if (untilTicksExclusive !== null) params.push(untilTicksExclusive);
+    params.push(Math.max(1, Math.floor(limit)));
+    return this.db
+      .prepare(
+        `SELECT * FROM events
+          WHERE actor_id = ? AND world_ticks >= ? ${clause}
+          ORDER BY seq ASC LIMIT ?`,
+      )
+      .all(...params)
+      .map(toEvent);
+  }
+
+  /**
+   * The last few things an actor did before a point in the ledger, oldest
+   * first — the lead-up to an event. Ordered inside a subquery so the newest
+   * matches are selected but read in chronological order.
+   */
+  forActorBefore(actorId: AgentId, seq: number, limit = 5): WorldEvent[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM (
+           SELECT * FROM events WHERE actor_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?
+         ) ORDER BY seq ASC`,
+      )
+      .all(actorId, seq, Math.max(1, Math.floor(limit)))
       .map(toEvent);
   }
 

@@ -201,10 +201,15 @@ src/
   chronicle/      generator.ts
   scheduler/      runtime.ts, locks.ts
   persistence/    db.ts, schema.sql, repositories/
-  observability/  logger.ts, metrics.ts, inspect.ts
+  observability/  logger.ts, views.ts, metrics.ts, causality.ts
   scenarios/      first-settlement.ts
   cli/            worldloom run | inspect | chronicle | events
 ```
+
+`observability/` holds the read side, and it does no formatting: `views.ts`,
+`metrics.ts` and `causality.ts` are pure functions from a `Store` to
+JSON-serialisable structures. The CLI renders them; a local web UI can serve the
+same objects over the wire without a second query layer (requirement 24).
 
 ## 9. Decisions
 
