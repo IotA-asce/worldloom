@@ -51,6 +51,9 @@ import {
 } from '../goals/planner.ts';
 import { agentOwner } from '../persistence/repositories/ledger.ts';
 import { OBSERVED } from '../memory/types.ts';
+import { placeTag, retrieve, retrievedContents, retrievedIds } from '../memory/retrieval.ts';
+import { outcomeTag, reflect, shouldReflect } from '../memory/reflection.ts';
+import { consolidate, shouldConsolidate } from '../memory/consolidation.ts';
 import type { NewEvent } from '../events/types.ts';
 
 const GOAL_SYSTEM_PROMPT = [
@@ -250,7 +253,7 @@ export async function tickAgent(agentId: Agent['id'], deps: TickDeps): Promise<R
     store.transaction(() => {
       store.plans.update(plan!);
       store.agents.update(after);
-      rememberStep(integrated, goal!, result.note, time, deps);
+      rememberStep(integrated, goal!, { succeeded: true, note: result.note }, time, deps);
     });
 
     if (plan.state === 'completed') {
@@ -260,6 +263,7 @@ export async function tickAgent(agentId: Agent['id'], deps: TickDeps): Promise<R
     }
 
     deps.log?.(`${integrated.name}: ${result.note}`, { agent: integrated.id, goal: goal.kind });
+    await tendMemory(after, time, deps);
     return ok({
       agentId: integrated.id,
       phaseAtStart,
@@ -282,6 +286,8 @@ export async function tickAgent(agentId: Agent['id'], deps: TickDeps): Promise<R
     agent: integrated.id,
     goal: goal.kind,
   });
+  // A run of failures is exactly what reflection should generalise from.
+  await tendMemory(integrated, time, deps);
 
   return ok({
     agentId: integrated.id,
@@ -383,7 +389,11 @@ async function chooseGoal(
   time: WorldTime,
   deps: TickDeps,
 ): Promise<{ goal: Goal | null; plan: Plan | null; reasoned: boolean }> {
-  const context = planningContext(agent, observation, time, deps);
+  // Retrieve once and reuse: the decision row must cite the same memories the
+  // prompt was built from, and re-running retrieval would also double-count
+  // access, quietly inflating how useful those memories look.
+  const retrievedForDecision = retrieveForDecision(agent, observation, time, deps);
+  const context = planningContext(agent, observation, time, deps, retrievedForDecision);
   const prompt = describeSituation(context);
 
   const answer = await deps.reasoning.reason({
@@ -452,7 +462,7 @@ async function chooseGoal(
           knownResources: context.knownResources.length,
           claimedWork: context.claimedWork,
         },
-        memoryIds: [],
+        memoryIds: retrievedIds(retrievedForDecision),
         prompt: answer.value.prompt,
         response: answer.value.raw,
         model: answer.value.model,
@@ -500,6 +510,15 @@ async function recoverFrom(
   let failedPlan = failStep(plan, stepIndex, failure);
   deps.store.transaction(() => {
     deps.store.plans.update(failedPlan);
+    // The failure becomes a memory as well as an event, so the agent can learn
+    // from it rather than only the developer reading the ledger.
+    rememberStep(
+      agent,
+      goal,
+      { succeeded: false, note: `${describeFailure(failure)} at ${formatPosition(agent.position)}` },
+      time,
+      deps,
+    );
     deps.store.events.appendAll(
       [
         {
@@ -643,23 +662,39 @@ function finishGoal(
   });
 }
 
-/** Store the step's outcome as an episodic memory, so it can influence later
- *  decisions. This is the link requirement 35's memory criterion depends on. */
+/**
+ * Store what happened as an episodic memory, so it can influence later decisions.
+ *
+ * **Failures are remembered as carefully as successes.** An agent that only
+ * remembers what worked cannot learn to avoid barren ground, which would make
+ * requirement 35's memory criterion vacuous — the interesting case is precisely
+ * "I dug here before and found nothing".
+ *
+ * The tags are what make a memory findable again: the goal kind, an outcome tag
+ * that reflection can generalise over, and a quantised place handle so
+ * considering the same ground later surfaces what happened on it.
+ */
 function rememberStep(
   agent: Agent,
   goal: Goal,
-  note: string,
+  outcome: { succeeded: boolean; note: string },
   time: WorldTime,
   deps: TickDeps,
 ): void {
+  const content = outcome.succeeded
+    ? `While trying to ${describeGoal(goal)}, I ${outcome.note}.`
+    : `I tried to ${describeGoal(goal)} but ${outcome.note}.`;
+
   deps.store.memories.insert(
     {
       agentId: agent.id,
       type: 'episodic',
-      content: `While trying to ${describeGoal(goal)}, I ${note}.`,
-      importance: 0.35,
+      content,
+      // A failure is worth more than a routine success: it is the thing worth
+      // not repeating.
+      importance: outcome.succeeded ? 0.35 : 0.5,
       source: OBSERVED,
-      tags: [goal.kind],
+      tags: [placeTag(agent.position), goal.kind, outcomeTag(outcome.succeeded)],
       relatedEntities: [goal.id],
     },
     { day: time.day, worldTicks: time.totalTicks },
@@ -673,14 +708,9 @@ function planningContext(
   observation: Observation,
   time: WorldTime,
   deps: TickDeps,
+  retrieved: ReturnType<typeof retrieve>,
 ): PlanningContext {
   const shelter = deps.store.knowledge.nearestLocation(agent.id, 'shelter', agent.position);
-  const memories = deps.store.memories
-    .candidates(agent.id, {
-      limit: deps.config.memory.retrieval_limit,
-      excludeConsolidated: true,
-    })
-    .map((memory) => memory.content);
 
   return {
     agent,
@@ -689,12 +719,85 @@ function planningContext(
     knownShelter: shelter?.position ?? null,
     settlementCenter: settlementCenter(deps),
     carrying: deps.store.ledger.balance(agentOwner(agent.id)),
-    memories,
+    memories: retrievedContents(retrieved),
     claimedWork: claimedWork(agent, deps),
     existingStructures: existingStructures(deps),
     sheltered: observation.sheltered,
     hostilesNearby: observation.nearbyEntities.filter((entity) => entity.hostile).length,
   };
+}
+
+/**
+ * Reflection and consolidation, run at the end of a tick.
+ *
+ * Both self-gate on their thresholds, so calling this every tick costs a cheap
+ * count query in the common case. Keeping it here rather than on a day boundary
+ * means an agent that has just had an eventful stretch generalises from it while
+ * the episodes are still fresh.
+ *
+ * Failures here are deliberately swallowed: an agent that cannot tidy its own
+ * memory should keep living, and the reason is already on the returned report.
+ */
+async function tendMemory(agent: Agent, time: WorldTime, deps: TickDeps): Promise<void> {
+  const identity = { id: agent.id, name: agent.name };
+
+  if (shouldReflect(deps.store, agent.id, deps.config.memory.reflection_interval)) {
+    const reflected = await reflect({
+      store: deps.store,
+      reasoning: deps.reasoning,
+      agent: identity,
+      time,
+    });
+    if (reflected.ok && reflected.value.belief !== null) {
+      deps.log?.(`${agent.name} came to believe: ${reflected.value.belief.content}`, {
+        agent: agent.id,
+      });
+    }
+  }
+
+  if (shouldConsolidate(deps.store, agent.id, deps.config.memory.consolidation_threshold)) {
+    const report = await consolidate({
+      store: deps.store,
+      reasoning: deps.reasoning,
+      agent: identity,
+      time,
+    });
+    if (report.ok && report.value.ran) {
+      deps.log?.(
+        `${agent.name} sorted through their memories ` +
+          `(${report.value.merged.length} merged, ${report.value.forgotten} forgotten)`,
+        { agent: agent.id },
+      );
+    }
+  }
+}
+
+/**
+ * Retrieve the memories relevant to *this* decision.
+ *
+ * The query is built from where the agent is and what it can see, so considering
+ * the same ground again surfaces what happened there last time. Retrieving the
+ * most important memories regardless of situation would return the same handful
+ * for every decision, which is the behaviour the retrieval module exists to
+ * replace (requirement 11).
+ */
+function retrieveForDecision(
+  agent: Agent,
+  observation: Observation,
+  time: WorldTime,
+  deps: TickDeps,
+): ReturnType<typeof retrieve> {
+  const visible = [...new Set(observation.visibleResources.map((seen) => seen.resource))];
+  return retrieve(
+    deps.store,
+    agent.id,
+    {
+      tags: [placeTag(agent.position), ...visible],
+      entities: observation.nearbyAgents.map((nearby) => nearby.name),
+      text: `${agent.role} at ${formatPosition(agent.position)} considering what to do`,
+    },
+    { limit: deps.config.memory.retrieval_limit, atTicks: time.totalTicks },
+  );
 }
 
 /** Context without a fresh observation, for replanning within a tick. */

@@ -354,3 +354,23 @@ export function placeTag(position: Position, cellSize = 16): string {
   const size = Math.max(1, Math.floor(cellSize));
   return `place:${Math.floor(position.x / size)},${Math.floor(position.z / size)}`;
 }
+
+/**
+ * Render a tag as something an agent could plausibly have thought.
+ *
+ * A place tag is a machine handle, and a belief phrased "place:-8,3 has gone
+ * badly for me" reads as a leaked internal. Beliefs end up in prompts and can
+ * reach the chronicle, so the handle has to become language at the point it is
+ * written into prose.
+ */
+export function describeTag(tag: string, cellSize = 16): string {
+  const place = /^place:(-?\d+),(-?\d+)$/.exec(tag);
+  if (place === null) return tag.replace(/_/g, ' ');
+
+  const size = Math.max(1, Math.floor(cellSize));
+  // The centre of the cell the handle names — close enough to be meaningful,
+  // vague enough to be honest about the quantisation.
+  const x = Number(place[1]) * size + Math.floor(size / 2);
+  const z = Number(place[2]) * size + Math.floor(size / 2);
+  return `the ground near (${x}, ${z})`;
+}
