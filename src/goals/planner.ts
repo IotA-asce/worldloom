@@ -462,11 +462,15 @@ function stepsFor(goal: Goal, context: PlanningContext, attempt: number): PlanSt
     case 'build_structure': {
       const params = goal.params as GoalParams['build_structure'];
       const site = params.site ?? context.settlementCenter ?? context.agent.position;
+      // The centre of an established settlement is built on, so "find ground
+      // near the camp" stops finding any. Widen the search with each attempt —
+      // the storage the colony never finished was always siting onto the shelter
+      // it already had, forty blocks at a time.
       return [
         makeStep(0, 'select_site', {
           blueprint: params.blueprint,
           near: site,
-          searchRadius: 40,
+          searchRadius: 40 + attempt * 60,
         }),
         makeStep(0, 'travel_to', { target: { kind: 'location', location: 'build_site' } }),
         makeStep(0, 'reserve_region', { region: siteRegion(site) }),
