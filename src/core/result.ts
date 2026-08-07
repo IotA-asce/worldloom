@@ -29,6 +29,9 @@ export type FailureKind =
   | 'REASONING_INVALID'
   /** The action isn't supported in the current embodiment mode. */
   | 'UNSUPPORTED'
+  /** The caller asked for something malformed or out of bounds — e.g. a survey
+   *  larger than the environment will sample. Also the bridge's own BAD_ARGS. */
+  | 'BAD_ARGS'
   /** Anything genuinely unexpected. Should be rare; investigate occurrences. */
   | 'INTERNAL';
 
