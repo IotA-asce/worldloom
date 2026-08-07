@@ -460,6 +460,41 @@ describe('memories', () => {
     store.close();
   });
 
+  it('lists undigested memories newest first, which is what reflection reads', () => {
+    const store = freshStore();
+    const agent = makeAgent();
+    store.agents.insert(agent);
+
+    const first = store.memories.insert({ agentId: agent.id, type: 'episodic', content: 'first', importance: 0.9, source: OBSERVED }, { day: 1, worldTicks: 1000 });
+    const second = store.memories.insert({ agentId: agent.id, type: 'episodic', content: 'second', importance: 0.1, source: OBSERVED }, { day: 1, worldTicks: 2000 });
+    const belief = store.memories.insert({ agentId: agent.id, type: 'semantic', content: 'a belief', importance: 0.5, source: OBSERVED }, { day: 1, worldTicks: 3000 });
+    store.memories.markConsolidated(agent.id, [first.id], belief.id);
+
+    // Ordered by time, not importance: "what has been happening to me lately"
+    // is a temporal question, unlike candidates().
+    assert.deepEqual(store.memories.unconsolidated(agent.id, 'episodic').map((m) => m.id), [second.id]);
+    assert.equal(store.memories.unconsolidated(agent.id, 'episodic', 1).length, 1);
+    store.close();
+  });
+
+  it('spares memories the caller says to keep, however faded', () => {
+    const store = freshStore();
+    const agent = makeAgent();
+    store.agents.insert(agent);
+
+    const belief = store.memories.insert({ agentId: agent.id, type: 'semantic', content: 'belief', importance: 0.9, source: OBSERVED }, CTX);
+    const spared = store.memories.insert({ agentId: agent.id, type: 'episodic', content: 'just superseded', importance: 0.01, source: OBSERVED }, CTX);
+    const dropped = store.memories.insert({ agentId: agent.id, type: 'episodic', content: 'long superseded', importance: 0.01, source: OBSERVED }, CTX);
+    store.memories.markConsolidated(agent.id, [spared.id, dropped.id], belief.id);
+
+    // Consolidation uses this so a summary never loses its evidence in the same
+    // breath it acquires it.
+    assert.equal(store.memories.forget(agent.id, 0.05, 5000, [spared.id]), 1);
+    assert.ok(store.memories.find(agent.id, spared.id) !== null);
+    assert.equal(store.memories.find(agent.id, dropped.id), null);
+    store.close();
+  });
+
   it('decays episodic importance but leaves semantic beliefs alone', () => {
     const store = freshStore();
     const agent = makeAgent();
