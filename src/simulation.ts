@@ -105,7 +105,8 @@ export class Simulation {
         onUsage: (record) => {
           spend.usd += record.costUsd;
           store.llmCalls.record({
-            agentId: null,
+            // Attributed, so "which agent is expensive?" is answerable.
+            agentId: record.agentId,
             category: record.category,
             provider: 'anthropic',
             model: record.model,

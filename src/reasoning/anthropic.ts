@@ -16,6 +16,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { modelFor, type ReasoningCategory, type WorldloomConfig } from '../core/config.ts';
+import type { AgentId } from '../core/ids.ts';
 import { ok, type Result } from '../core/result.ts';
 import { estimateCostUsd } from './pricing.ts';
 import {
@@ -41,6 +42,14 @@ export interface AnthropicProviderOptions {
 
 export interface UsageRecord {
   readonly category: ReasoningCategory;
+  /**
+   * Who the reasoning was for, when it was for anyone.
+   *
+   * Without this, every call lands in one unattributed bucket and "which agent
+   * is expensive?" — a question requirement 29 explicitly asks for — cannot be
+   * answered at all.
+   */
+  readonly agentId: AgentId | null;
   readonly model: string;
   readonly usage: TokenUsage;
   readonly costUsd: number;
@@ -77,6 +86,8 @@ export class AnthropicProvider implements ReasoningProvider {
       );
     }
 
+    const agentId = request.agentId;
+
     const retries = this.config.reasoning.structured_retries;
     let lastProblem = 'unknown';
 
@@ -107,24 +118,24 @@ export class AnthropicProvider implements ReasoningProvider {
         // content to read, and a truncated answer's JSON is incomplete.
         if (message.stop_reason === 'refusal') {
           lastProblem = `the model declined the request (${message.stop_details?.category ?? 'unspecified'})`;
-          this.report(request.category, model, usage, costUsd, durationMs, false, lastProblem);
+          this.report(request.category, agentId, model, usage, costUsd, durationMs, false, lastProblem);
           // A refusal is deterministic — retrying the same prompt cannot help.
           break;
         }
         if (message.stop_reason === 'max_tokens') {
           lastProblem = 'the response hit max_tokens before completing';
-          this.report(request.category, model, usage, costUsd, durationMs, false, lastProblem);
+          this.report(request.category, agentId, model, usage, costUsd, durationMs, false, lastProblem);
           continue;
         }
 
         const parsed = message.parsed_output;
         if (parsed === null || parsed === undefined) {
           lastProblem = 'the response did not validate against the schema';
-          this.report(request.category, model, usage, costUsd, durationMs, false, lastProblem);
+          this.report(request.category, agentId, model, usage, costUsd, durationMs, false, lastProblem);
           continue;
         }
 
-        this.report(request.category, model, usage, costUsd, durationMs, true, null);
+        this.report(request.category, agentId, model, usage, costUsd, durationMs, true, null);
         return ok({
           value: parsed,
           source: 'model',
@@ -139,6 +150,7 @@ export class AnthropicProvider implements ReasoningProvider {
         lastProblem = describeError(error);
         this.report(
           request.category,
+          agentId,
           model,
           NO_USAGE,
           0,
@@ -181,6 +193,7 @@ export class AnthropicProvider implements ReasoningProvider {
 
   private report(
     category: ReasoningCategory,
+    agentId: AgentId | null,
     model: string,
     usage: TokenUsage,
     costUsd: number,
@@ -188,7 +201,7 @@ export class AnthropicProvider implements ReasoningProvider {
     succeeded: boolean,
     error: string | null,
   ): void {
-    this.onUsage?.({ category, model, usage, costUsd, durationMs, ok: succeeded, error });
+    this.onUsage?.({ category, agentId, model, usage, costUsd, durationMs, ok: succeeded, error });
   }
 }
 
