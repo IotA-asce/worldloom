@@ -191,6 +191,33 @@ export class MemoryRepository {
     });
   }
 
+  /**
+   * Update a belief in place as fresh evidence for it accumulates.
+   *
+   * Reflection uses this instead of writing a second near-identical belief every
+   * interval: without it an agent's semantic memory fills with copies of the same
+   * conclusion, which crowds retrieval and reads as thinking in circles.
+   */
+  reinforce(
+    agentId: AgentId,
+    id: MemoryId,
+    update: { content: string; importance: number; confidence: number },
+    worldTicks: number,
+  ): MemoryEntry {
+    this.db
+      .prepare(
+        `UPDATE memories
+            SET content = ?, importance = ?, confidence = ?, last_accessed_ticks = ?,
+                access_count = access_count + 1
+          WHERE id = ? AND agent_id = ?`,
+      )
+      .run(update.content, update.importance, update.confidence, worldTicks, id, agentId);
+
+    const reinforced = this.find(agentId, id);
+    if (reinforced === null) throw new Error(`cannot reinforce unknown memory ${id}`);
+    return reinforced;
+  }
+
   /** Point a batch of raw memories at the belief they were consolidated into.
    *  They stay retrievable at lower priority — the belief's evidence survives. */
   markConsolidated(agentId: AgentId, ids: readonly MemoryId[], into: MemoryId): void {

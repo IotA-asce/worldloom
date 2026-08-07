@@ -30,6 +30,7 @@ import { ok, type Result } from '../core/result.ts';
 import type { WorldTime } from '../core/world.ts';
 import type { Store } from '../persistence/store.ts';
 import type { AnswerSource, ReasoningProvider } from '../reasoning/provider.ts';
+import { describeTag } from './retrieval.ts';
 import { inferredFrom, type MemoryEntry } from './types.ts';
 
 /**
@@ -212,6 +213,9 @@ export function ruleReflection(memories: readonly MemoryEntry[]): Reflection | n
 
   const subject = dominantSubject(memories);
   if (subject === null) return null;
+  // The subject is stored as a machine handle so it stays retrievable, but the
+  // prose has to read as a thought rather than a tag.
+  const spoken = describeTag(subject.name);
 
   const supporting = subject.supporting;
   const total = supporting.length;
@@ -225,10 +229,10 @@ export function ruleReflection(memories: readonly MemoryEntry[]): Reflection | n
 
   const belief =
     failures >= MIN_EPISODES_TO_REFLECT && failures > successes
-      ? `${subject.name} has gone badly for me: ${failures} of ${total} attempts came to nothing.`
+      ? `${spoken} has gone badly for me: ${failures} of ${total} attempts came to nothing.`
       : successes >= MIN_EPISODES_TO_REFLECT && successes > failures
-        ? `${subject.name} has been reliable for me: ${successes} of ${total} attempts went well.`
-        : `${subject.name} keeps coming up in what I do — ${total} times lately, with mixed results.`;
+        ? `${spoken} has been reliable for me: ${successes} of ${total} attempts went well.`
+        : `${spoken} keeps coming up in what I do — ${total} times lately, with mixed results.`;
 
   const meanImportance =
     supporting.reduce((sum, memory) => sum + memory.importance, 0) / Math.max(1, total);
@@ -346,6 +350,39 @@ export async function reflect(deps: ReflectDeps): Promise<Result<ReflectionOutco
   const supporting = episodes.filter((memory) => mentions(memory, reflection.subject));
   const evidence = (supporting.length > 0 ? supporting : episodes).map((memory) => memory.id);
 
+  // Reinforce rather than restate. Without this an agent forms the same belief
+  // about the same subject every reflection interval, and after a long run its
+  // semantic memory is mostly near-identical copies — which crowds retrieval and
+  // makes the agent look like it is thinking in circles.
+  const existing = existingBelief(store, agent.id, reflection.subject);
+  if (existing !== null) {
+    const reinforced = store.transaction(() => {
+      const updated = store.memories.reinforce(
+        agent.id,
+        existing.id,
+        {
+          content: reflection.belief,
+          importance: clamp01(Math.max(existing.importance, reflection.importance)),
+          // Repeated evidence for the same conclusion raises confidence, capped
+          // so a belief never becomes certain from repetition alone.
+          confidence: clamp01(Math.min(0.95, existing.confidence + 0.08)),
+        },
+        time.totalTicks,
+      );
+      if (deps.markConsolidated !== false) {
+        store.memories.markConsolidated(agent.id, evidence, existing.id);
+      }
+      return updated;
+    });
+
+    return ok({
+      belief: reinforced,
+      from: evidence,
+      source,
+      note: `strengthened an existing belief about ${reflection.subject}`,
+    });
+  }
+
   const belief = store.transaction(() => {
     const stored = store.memories.insert(
       {
@@ -382,6 +419,22 @@ export async function reflect(deps: ReflectDeps): Promise<Result<ReflectionOutco
   });
 
   return ok({ belief, from: evidence, source, note: `formed a belief about ${reflection.subject}` });
+}
+
+/**
+ * A belief this agent already holds about the same subject.
+ *
+ * Matched on the subject tag rather than on the prose, because the wording will
+ * differ every time a model writes it while the subject is a stable handle.
+ */
+function existingBelief(store: Store, agentId: AgentId, subject: string): MemoryEntry | null {
+  const wanted = subject.trim().toLowerCase();
+  if (wanted.length === 0) return null;
+  for (const candidate of store.memories.byType(agentId, 'semantic', 200)) {
+    if (candidate.consolidatedInto !== null) continue;
+    if (candidate.tags.some((tag) => tag.trim().toLowerCase() === wanted)) return candidate;
+  }
+  return null;
 }
 
 function nothing(note: string): ReflectionOutcome {
