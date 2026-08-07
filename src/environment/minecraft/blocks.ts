@@ -21,6 +21,20 @@ export const RESOURCE_BLOCKS: Readonly<Record<ResourceKind, readonly string[]>> 
     'mangrove_log',
     'cherry_log',
     'pale_oak_log',
+    // Worked wood yields wood too. Without these, `surfaceFromBlock` reports a
+    // plank wall as `wood` while `resourceFromBlock` reports nothing — so an
+    // agent perceives a timber building as a source of timber and is then told
+    // there is none there. A live-server test caught exactly that.
+    'oak_planks',
+    'spruce_planks',
+    'birch_planks',
+    'jungle_planks',
+    'acacia_planks',
+    'dark_oak_planks',
+    'oak_door',
+    'oak_fence',
+    'oak_stairs',
+    'oak_slab',
   ],
   stone: [
     'stone',
@@ -33,7 +47,11 @@ export const RESOURCE_BLOCKS: Readonly<Record<ResourceKind, readonly string[]>> 
     'tuff',
   ],
   soil: ['dirt', 'coarse_dirt', 'rooted_dirt', 'podzol', 'grass_block'],
-  sand: ['sand', 'red_sand', 'gravel'],
+  // Glass is included so a glazed structure can be dismantled back into sand.
+  // Vanilla glass drops nothing, but Worldloom's ledger is an abstraction and a
+  // one-way resource sink is worse than a small fidelity gap: resources should
+  // not vanish permanently into a wall.
+  sand: ['sand', 'red_sand', 'gravel', 'glass'],
   coal: ['coal_ore', 'deepslate_coal_ore'],
   iron: ['iron_ore', 'deepslate_iron_ore'],
   food: ['sweet_berry_bush', 'melon', 'pumpkin', 'wheat', 'carrots', 'potatoes', 'beetroots'],
@@ -49,6 +67,9 @@ export const RESOURCE_BLOCKS: Readonly<Record<ResourceKind, readonly string[]>> 
     'fern',
     'large_fern',
     'sugar_cane',
+    // Worked fibre, for the same reason as worked wood above: a thatch roof has
+    // to be recoverable, or building is a one-way loss.
+    'hay_block',
   ],
 };
 
