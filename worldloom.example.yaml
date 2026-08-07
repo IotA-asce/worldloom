@@ -1,0 +1,65 @@
+# Worldloom configuration. Copy to worldloom.yaml (gitignored) and edit.
+# Every value here is the default; override only what you need.
+# Environment variables win over this file: WORLDLOOM_BRIDGE_URL, ANTHROPIC_API_KEY.
+
+simulation:
+  scenario: first-settlement
+  agents: 5
+  # Wall-clock seconds between an agent's ticks. Not simulation time —
+  # narrative time comes from the Minecraft clock (ADR-0011).
+  tick_interval_seconds: 2
+  # Stop after this many Minecraft days. null runs until interrupted.
+  max_days: null
+  # Seeds agent rotation and any deterministic jitter, so runs are comparable.
+  seed: 1
+
+environment:
+  type: minecraft          # minecraft | fake
+  minecraft:
+    bridge_url: ws://127.0.0.1:8765
+    world: world
+    # logical: agents are Worldloom-owned entities, no Minecraft client needed.
+    # piloted: bind one agent to an online player (ADR-0003).
+    embodiment: logical
+    # Summon a named marker entity per agent so you can watch them. Cosmetic.
+    visible_markers: true
+    # Multiply world time so a multi-day demo doesn't take hours. 1 = real rate.
+    time_scale: 1
+    command_timeout_ms: 10000
+
+reasoning:
+  # anthropic | heuristic. heuristic runs the whole simulation with no model
+  # and no API key — used by the tests.
+  provider: anthropic
+  model: claude-sonnet-5
+  max_concurrency: 3
+  # Per-category model overrides: strong models for strategy, cheap for
+  # summarisation. Omitted categories use `model` above.
+  models:
+    goal_selection: claude-sonnet-5
+    replanning: claude-sonnet-5
+    message_interpretation: claude-haiku-4-5-20251001
+    reflection: claude-haiku-4-5-20251001
+    consolidation: claude-haiku-4-5-20251001
+    chronicle: claude-sonnet-5
+  # Bounded retries when structured output fails validation, before falling
+  # back to the heuristic answer for that category.
+  structured_retries: 2
+  # Abort the run if estimated spend exceeds this (USD). null disables.
+  budget_usd: null
+
+memory:
+  retrieval_limit: 10
+  # Consolidate an agent's memories once it holds more than this many.
+  consolidation_threshold: 200
+  # Reflect after this many new episodic memories.
+  reflection_interval: 15
+
+persistence:
+  database: ./worldloom.db
+
+logging:
+  level: info              # debug | info | warn | error
+  format: pretty           # pretty | json
+  # Persist full prompts and responses for `worldloom why`. Costs disk.
+  record_decisions: true

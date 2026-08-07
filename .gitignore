@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Simulation state — local only, never committed
+*.db
+*.db-wal
+*.db-shm
+runs/
+worldloom.db*
+
+# Local configuration and secrets
+.env
+.env.*
+worldloom.local.yaml
+config.local.yaml
+
+.DS_Store
+*.log
