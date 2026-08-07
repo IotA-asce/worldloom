@@ -162,6 +162,7 @@ function context(agent: Agent, memories: readonly string[]): PlanningContext {
     memories,
     claimedWork: [],
     existingStructures: [],
+    work: null,
     sheltered: false,
     hostilesNearby: 0,
   };

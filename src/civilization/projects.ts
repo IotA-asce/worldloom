@@ -97,11 +97,22 @@ export function reasonOfKind(kind: string): string {
   return 'the settlement wants this done';
 }
 
-export function describeProject(project: Project): string {
-  const blueprint = blueprintOfKind(project.kind);
+/**
+ * A kind rendered as prose: `build:small_shelter` → `a shelter`.
+ *
+ * Exported because the chronicle needs it. A kind string is an identifier, and
+ * identifiers do not belong in history — `the shared work of build:small shelter
+ * was finished` is a log line wearing a sentence's clothes.
+ */
+export function describeKind(kind: string): string {
+  const blueprint = blueprintOfKind(kind);
   if (blueprint !== null) return `a ${structureTypeOf(blueprint)}`;
-  const resource = resourceOfKind(project.kind);
-  return resource === null ? project.kind : `a store of ${resource}`;
+  const resource = resourceOfKind(kind);
+  return resource === null ? kind : `a store of ${resource}`;
+}
+
+export function describeProject(project: Project): string {
+  return describeKind(project.kind);
 }
 
 // ── Progress against the shared store ───────────────────────────────────────

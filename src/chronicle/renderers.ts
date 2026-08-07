@@ -13,6 +13,7 @@
  * rather than a gap discovered six days into a run.
  */
 
+import { describeKind } from '../civilization/projects.ts';
 import type { AgentId } from '../core/ids.ts';
 import {
   formatBundle,
@@ -287,7 +288,7 @@ const RENDERERS: RendererMap = {
   // ── Coordination ──────────────────────────────────────────────────────────
   project_created: (event) =>
     sentence(
-      `The settlement took on ${humanize(event.payload.kind)} as shared work on ` +
+      `The settlement took on ${describeKind(event.payload.kind)} as shared work on ` +
         `day ${String(event.day)}, needing ${formatBundle(event.payload.requirements)}`,
     ),
 
@@ -299,7 +300,7 @@ const RENDERERS: RendererMap = {
 
   project_completed: (event) =>
     sentence(
-      `The shared work of ${humanize(event.payload.kind)} was finished on ` +
+      `The shared work on ${describeKind(event.payload.kind)} was finished on ` +
         `day ${String(event.day)}`,
     ),
 

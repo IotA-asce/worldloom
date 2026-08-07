@@ -163,8 +163,10 @@ export const DEFAULT_IMPORTANCE: Readonly<Record<EventType, Importance>> = {
   settlement_founded: 1.0,
   agent_spawned: 0.9,
 
-  location_discovered: 0.5,
-  resource_discovered: 0.7,
+  location_discovered: 0.4,
+  // Finding another berry bush is not history. A *first* strike is, and the
+  // executor raises the importance of those individually — see actions.ts.
+  resource_discovered: 0.35,
   knowledge_shared: 0.6,
 
   resource_collected: 0.3,
@@ -208,13 +210,17 @@ export const DEFAULT_IMPORTANCE: Readonly<Record<EventType, Importance>> = {
  * Types that always reach the chronicle regardless of the importance threshold
  * (ADR-0009 step 1). A settlement's founding is never "routine" even on a busy
  * day that raises the bar.
+ *
+ * `resource_discovered` is deliberately *not* here. Five settlers foraging
+ * rediscover food constantly, and forcing every find into history buried the
+ * shelter being built under forty berry bushes. Importance decides instead, and
+ * a genuine first strike is given a high one where it happens.
  */
 export const ALWAYS_NOTABLE: ReadonlySet<EventType> = new Set<EventType>([
   'settlement_founded',
   'agent_spawned',
   'agent_died',
   'structure_completed',
-  'resource_discovered',
   'goal_failed',
   'project_completed',
 ]);
