@@ -94,6 +94,8 @@ export interface NewMemory {
 
 export const LOCATION_KINDS = [
   'settlement',
+  /** Ground an agent has chosen to build on but has not built on yet. */
+  'build_site',
   'shelter',
   'storage',
   'farm',

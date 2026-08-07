@@ -12,7 +12,7 @@ import { describe, it } from 'node:test';
 import type { AgentView } from '../../src/agents/agent.ts';
 import type { AgentId } from '../../src/core/ids.ts';
 import { expect } from '../../src/core/result.ts';
-import { position, regionVolume, type Blueprint, type Region } from '../../src/core/world.ts';
+import { horizontalDistance, position, regionVolume, type Blueprint, type Region } from '../../src/core/world.ts';
 import { FakeEnvironment, flatEnvironment } from '../../src/environment/fake/environment.ts';
 
 function agentAt(x: number, y: number, z: number): AgentView {
@@ -172,7 +172,10 @@ describe('movement is constrained by real terrain', () => {
     const start = standingAt(env, 0, 0);
     const result = expect(await env.moveAgent(start, position(20, start.position.y, 0)), 'move');
     assert.ok(result.arrived, 'flat ground should be crossable');
-    assert.ok(result.distance > 19);
+    // Arrival is "within tolerance of the destination", not "standing exactly on
+    // it", so the reported distance is a block or so short of the full 20.
+    assert.ok(result.distance >= 18, `only travelled ${result.distance}`);
+    assert.ok(horizontalDistance(result.to, position(20, start.position.y, 0)) <= 1.5);
   });
 
   it('treats a zero-length move as arrival, not an error', async () => {

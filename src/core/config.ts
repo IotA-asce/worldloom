@@ -36,7 +36,8 @@ const CHEAP_MODEL = 'claude-haiku-4-5';
 const simulationSchema = z.object({
   scenario: z.string().default('first-settlement'),
   agents: z.number().int().min(1).max(50).default(5),
-  tick_interval_seconds: z.number().positive().default(2),
+  // 0 means run flat out, which is what tests and soak runs want.
+  tick_interval_seconds: z.number().min(0).default(2),
   max_days: z.number().int().positive().nullable().default(null),
   seed: z.number().int().default(1),
 });

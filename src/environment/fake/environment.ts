@@ -13,7 +13,6 @@ import { fail, ok, type Result } from '../../core/result.ts';
 import {
   blueprintRegion,
   distance,
-  horizontalDistance,
   MATERIAL_COST,
   regionPositions,
   regionVolume,
@@ -29,6 +28,7 @@ import {
 } from '../../core/world.ts';
 import { phaseOf, isDaylight, TICKS_PER_DAY } from '../../persistence/repositories/simulation.ts';
 import {
+  boundVisibleResources,
   BUILD_COMPLETION_THRESHOLD,
   verificationSampleSize,
   type BlockInfo,
@@ -42,6 +42,7 @@ import {
   type Observation,
   type VisibleResource,
 } from '../port.ts';
+import { traverse } from '../traversal.ts';
 import { AIR, FakeWorld, MAX_ELEVATION, MIN_ELEVATION, type FakeBlock } from './world.ts';
 
 /** Placed materials, mirroring what the Minecraft adapter maps to blocks. */
@@ -56,9 +57,13 @@ const MATERIAL_BLOCKS: Readonly<Record<BuildMaterial, FakeBlock>> = {
   empty: AIR,
 };
 
-/** How steep a single step can be before the route is impassable. */
-const MAX_STEP_UP = 1;
-const MAX_STEP_DOWN = 4;
+/**
+ * How far below a column's surface an agent can tell what is there.
+ *
+ * Deep enough to include the rock under the soil — which is common knowledge,
+ * not clairvoyance — and shallow enough that ore must still be dug for.
+ */
+const PERCEPTION_DEPTH = 6;
 
 export interface FakeEnvironmentOptions {
   readonly seed?: number;
@@ -97,6 +102,7 @@ export class FakeEnvironment implements Environment {
       embodiment: 'logical',
       elevationRange: { min: MIN_ELEVATION, max: MAX_ELEVATION },
       maxSurveyCells: 16_384,
+      observationRadius: 32,
     };
   }
 
@@ -187,58 +193,36 @@ export class FakeEnvironment implements Environment {
   async moveAgent(agent: AgentView, to: Position): Promise<Result<MoveResult>> {
     if (!this.connected) return fail('ENVIRONMENT_DISCONNECTED', 'fake environment not connected');
 
-    const from = agent.position;
-    const total = horizontalDistance(from, to);
-    if (total < 1) {
-      return ok({ from, to: from, distance: 0, arrived: true });
+    // Terrain-following steering, shared with the Minecraft adapter. The agent
+    // walks around a rise but cannot cross a cliff — which is what keeps its
+    // position honest (ADR-0003).
+    const walked = traverse(agent.position, to, (x, z) => this.walkableHeight(x, z));
+
+    if (walked.blockedAt !== null) {
+      return fail('PATH_BLOCKED', 'impassable terrain immediately ahead', {
+        observed: { blockedAt: walked.blockedAt },
+      });
     }
 
-    // Walk the route one block at a time, checking each step is survivable.
-    // This is what makes logical embodiment honest: the agent cannot cross a
-    // cliff just because Worldloom would like it to (ADR-0003).
-    const steps = Math.ceil(total);
-    let current = from;
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const x = Math.round(from.x + (to.x - from.x) * t);
-      const z = Math.round(from.z + (to.z - from.z) * t);
-      const y = this.world.surfaceHeight(x, z) + 1;
-      const climb = y - current.y;
+    this.agentPositions.set(agent.id, { name: agent.name, position: walked.to });
+    return {
+      ok: true,
+      value: {
+        from: agent.position,
+        to: walked.to,
+        distance: walked.distance,
+        arrived: walked.arrived,
+      },
+    };
+  }
 
-      if (climb > MAX_STEP_UP || climb < -MAX_STEP_DOWN) {
-        const travelled = horizontalDistance(from, current);
-        if (travelled < 1) {
-          return fail(
-            'PATH_BLOCKED',
-            `impassable terrain immediately ahead: ${climb > 0 ? 'a rise' : 'a drop'} of ${Math.abs(climb)} blocks`,
-            { observed: { blockedAt: { x, y, z }, climb } },
-          );
-        }
-        // Partial progress is a success — the planner can try again from here.
-        return ok({ from, to: current, distance: travelled, arrived: false });
-      }
-
-      // Standing in water is survivable but not somewhere to stop.
-      if (this.world.blockAt({ x, y: y - 1, z }).surface === 'water') {
-        const travelled = horizontalDistance(from, current);
-        if (travelled < 1) {
-          return fail('PATH_BLOCKED', 'water blocks the route', {
-            observed: { blockedAt: { x, y, z } },
-          });
-        }
-        return ok({ from, to: current, distance: travelled, arrived: false });
-      }
-
-      current = { x, y, z };
-    }
-
-    this.agentPositions.set(agent.id, { name: agent.name, position: current });
-    return ok({
-      from,
-      to: current,
-      distance: horizontalDistance(from, current),
-      arrived: horizontalDistance(current, to) <= 1.5,
-    });
+  /** Ground level at a column, or null where an agent cannot stand. */
+  private walkableHeight(x: number, z: number): number | null {
+    const y = this.world.surfaceHeight(x, z);
+    const surface = this.world.blockAt({ x, y, z }).surface;
+    // Standing in water is not walking.
+    if (surface === 'water') return null;
+    return y;
   }
 
   async harvest(
@@ -392,30 +376,64 @@ export class FakeEnvironment implements Environment {
     // trees over there" rather than 400 individual blocks.
     const clusters = new Map<string, { resource: ResourceKind; position: Position; count: number }>();
     for (const cell of survey.cells) {
-      const block = this.world.blockAt({ x: cell.x, y: cell.y, z: cell.z });
-      if (block.yields === null || block.yields === 'soil') continue;
-      // Cluster on a 16-block grid.
-      const key = `${block.yields}:${Math.floor(cell.x / 16)},${Math.floor(cell.z / 16)}`;
-      const existing = clusters.get(key);
-      if (existing === undefined) {
-        clusters.set(key, {
-          resource: block.yields,
-          position: { x: cell.x, y: cell.y, z: cell.z },
-          count: 1,
-        });
-      } else {
-        existing.count++;
+      // A column offers more than one thing, and reading only its top block
+      // hides most of them: over a tree the top block is canopy, and on open
+      // ground it is grass with the rock everyone knows about a few blocks below.
+      for (const found of this.resourcesInColumn(cell.x, cell.y, cell.z)) {
+        // Cluster on a 16-block grid.
+        const key = `${found.yields}:${Math.floor(cell.x / 16)},${Math.floor(cell.z / 16)}`;
+        const existing = clusters.get(key);
+        if (existing === undefined) {
+          clusters.set(key, { resource: found.yields, position: found.position, count: 1 });
+        } else {
+          existing.count++;
+        }
       }
     }
 
-    return [...clusters.values()]
+    const ranked = [...clusters.values()]
       .map((cluster) => ({
         resource: cluster.resource,
         position: cluster.position,
-        // A surface cell of wood implies a whole tree beneath the canopy.
+        // A canopy cell implies a whole trunk beneath it.
         estimatedQuantity: cluster.resource === 'wood' ? cluster.count * 4 : cluster.count,
       }))
       .sort((a, b) => b.estimatedQuantity - a.estimatedQuantity);
+
+    // Bounded per kind: an observation is rendered into prompts, and a hundred
+    // near-identical clusters is noise that costs tokens (requirement 29).
+    return boundVisibleResources(ranked);
+  }
+
+  /**
+   * Everything a column plausibly offers, looking down from its top block.
+   *
+   * Returns a list rather than one answer, because a column genuinely offers
+   * several things and picking only the topmost hides the useful ones: the top
+   * block over a forest is leaves, and on open ground it is grass sitting on the
+   * rock everyone knows is underneath.
+   *
+   * The probe depth is what keeps this honest rather than omniscient. Stone lies
+   * a few blocks down and is common knowledge; ore lies far deeper and stays
+   * hidden until an agent digs for it.
+   */
+  private resourcesInColumn(
+    x: number,
+    surfaceY: number,
+    z: number,
+  ): { yields: ResourceKind; position: Position }[] {
+    const found: { yields: ResourceKind; position: Position }[] = [];
+    const seen = new Set<ResourceKind>();
+
+    for (let dy = 0; dy <= PERCEPTION_DEPTH; dy++) {
+      const y = surfaceY - dy;
+      const block = this.world.blockAt({ x, y, z });
+      if (block.yields === null || seen.has(block.yields)) continue;
+      seen.add(block.yields);
+      found.push({ yields: block.yields, position: { x, y, z } });
+    }
+
+    return found;
   }
 
   private nearbyAgents(agent: AgentView, radius: number): NearbyAgent[] {

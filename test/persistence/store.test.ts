@@ -323,7 +323,7 @@ describe('goals and plans', () => {
       id: 'plan_000001' as PlanId,
       goalId: goal.id,
       agentId: agent.id,
-      steps: [makeStep(0, 'rest', { ticks: 10 })],
+      steps: [makeStep(0, 'rest', { untilEnergy: 0.9 })],
       currentStep: 0,
       state: 'active',
       createdAtTicks: 1000,

@@ -185,8 +185,9 @@ export class FakeWorld {
       if (ground < SEA_LEVEL) return SAND;
       if (ground <= SEA_LEVEL + 1) return SAND;
       if (ground > SEA_LEVEL + 28) return SNOW;
-      // Forage grows in scattered clumps on grassland.
-      if (hash2(x, z, this.seed + 5501) > 0.94) return FORAGE;
+      // Forage grows in scattered clumps on grassland — common enough that a
+      // forager can feed themselves, sparse enough that they have to look.
+      if (hash2(x, z, this.seed + 5501) > 0.88) return FORAGE;
       return GRASS;
     }
 
