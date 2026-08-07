@@ -27,15 +27,27 @@ Four implementations:
 
 | Implementation | Purpose |
 |---|---|
-| `AnthropicProvider` | production reasoning; tool-use-based structured output |
+| `AnthropicProvider` | production reasoning via the API's structured-output support |
 | `HeuristicProvider` | **rule-based, no network** — every category answered deterministically |
 | `ScriptedProvider` | fixture playback keyed by category + prompt hash, for tests |
 | `RecordingProvider` | wraps another, writes fixtures for `ScriptedProvider` |
 
-Invalid output never crashes the simulation: a failed structured call surfaces as
-an `ActionFailure` of kind `REASONING_INVALID`, and the agent falls back to the
-heuristic answer for that category. A model outage degrades the civilization's
-intelligence; it does not stop the world.
+Structured output uses `output_config.format` with the category's schema (via the
+SDK's `messages.parse`), so validation happens in the API rather than in a
+prompt instruction plus a hopeful `JSON.parse`. Asking for JSON in prose and
+parsing the reply is the standard source of silent simulation corruption, and it
+is what requirement 27 forbids.
+
+**Every failure degrades to the rule, and none throws.** A refusal, a response
+truncated at `max_tokens`, output that fails validation, a rate limit, a dead
+network, or an exhausted budget all produce a successful result whose `source` is
+`fallback`, carrying the reason. A model outage makes the civilization duller; it
+does not stop the world. Because the reason is recorded, a run's actual reliance
+on the model is measurable rather than assumed.
+
+The mechanism that makes this work is a single required field:
+`ReasoningRequest.fallback`. Every call site must supply a deterministic answer,
+which is why `HeuristicProvider`'s entire implementation is "call it".
 
 ## The heuristic provider is load-bearing
 

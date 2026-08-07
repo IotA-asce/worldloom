@@ -31,17 +31,18 @@ reasoning:
   # anthropic | heuristic. heuristic runs the whole simulation with no model
   # and no API key — used by the tests.
   provider: anthropic
-  model: claude-sonnet-5
+  model: claude-opus-5
   max_concurrency: 3
   # Per-category model overrides: strong models for strategy, cheap for
-  # summarisation. Omitted categories use `model` above.
+  # summarisation. Omitted categories use `model` above. Routing the high-volume
+  # categories to a small model is the biggest cost lever available.
   models:
-    goal_selection: claude-sonnet-5
-    replanning: claude-sonnet-5
-    message_interpretation: claude-haiku-4-5-20251001
-    reflection: claude-haiku-4-5-20251001
-    consolidation: claude-haiku-4-5-20251001
-    chronicle: claude-sonnet-5
+    goal_selection: claude-opus-5
+    replanning: claude-opus-5
+    message_interpretation: claude-haiku-4-5
+    reflection: claude-haiku-4-5
+    consolidation: claude-haiku-4-5
+    chronicle: claude-opus-5
   # Bounded retries when structured output fails validation, before falling
   # back to the heuristic answer for that category.
   structured_retries: 2
