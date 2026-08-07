@@ -519,14 +519,32 @@ async function selectSite(
   const survey = await ctx.environment.surveyRegion(searchRegion, 2);
   if (!survey.ok) return survey;
 
-  const site = chooseFlattestSite(survey.value.cells, blueprint.size.width, blueprint.size.depth);
+  const site = chooseFlattestSite(
+    survey.value.cells,
+    blueprint.size.width,
+    blueprint.size.depth,
+    (footprint) => groundIsTaken(ctx, footprint),
+  );
   if (site === null) {
-    return fail('TARGET_CHANGED', 'no flat, dry ground here to build on', {
+    return fail('TARGET_CHANGED', 'no free, flat, dry ground here to build on', {
       observed: { searchRegion },
     });
   }
 
   ctx.store.transaction(() => {
+    // Claim the ground in the same breath as choosing it. Siting and reserving
+    // used to be separate steps, so two settlers could survey before either
+    // reserved, both pick the flattest patch, and the loser replan onto it again
+    // and again — 44 of one run's last 50 failures. Choosing is claiming.
+    claimGround(
+      ctx,
+      makeRegion(site, {
+        x: site.x + blueprint.size.width,
+        y: site.y + blueprint.size.height,
+        z: site.z + blueprint.size.depth,
+      }),
+    );
+
     // Recorded as a build site specifically, because the next plan step travels
     // to "the nearest known build_site" — filing it as a generic landmark leaves
     // the agent unable to walk to the spot it just chose.
@@ -574,28 +592,7 @@ async function reserveRegion(
     }
   }
 
-  const id = ctx.store.ids.next('resv');
-  ctx.store.db
-    .prepare(
-      `INSERT INTO reservations (id, agent_id, min_x, min_y, min_z, max_x, max_y, max_z,
-                                purpose, created_at_ticks, expires_at_ticks)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      id,
-      ctx.agent.id,
-      params.region.min.x,
-      params.region.min.y,
-      params.region.min.z,
-      params.region.max.x,
-      params.region.max.y,
-      params.region.max.z,
-      `${ctx.goal.kind}:${ctx.goal.id}`,
-      ctx.time.totalTicks,
-      // Expiry so a dead agent can't hold a build site forever.
-      ctx.time.totalTicks + 12_000,
-    );
-
+  claimGround(ctx, params.region);
   return ok({ note: 'claimed the site' });
 }
 
@@ -995,6 +992,7 @@ function chooseFlattestSite(
   cells: readonly SurveyCell[],
   width: number,
   depth: number,
+  taken: (footprint: Region) => boolean = () => false,
 ): Position | null {
   if (cells.length === 0) return null;
 
@@ -1019,6 +1017,21 @@ function chooseFlattestSite(
     }
     if (!dry || heights.length < 4) continue;
 
+    // Ground someone else has already claimed is not a site, however flat it is.
+    // Without this, two settlers siting near the same centre choose the same
+    // flattest cell, one reserves it and the other replans onto it forever — a
+    // 400-round run spent 43 of its last 50 failures on exactly that loop.
+    if (
+      taken(
+        makeRegion(
+          { x: cell.x, y: cell.y + 1, z: cell.z },
+          { x: cell.x + width, y: cell.y + 1, z: cell.z + depth },
+        ),
+      )
+    ) {
+      continue;
+    }
+
     const spread = Math.max(...heights) - Math.min(...heights);
     // Prefer flat, then slightly raised — a settlement on a rise reads well and
     // drains.
@@ -1029,6 +1042,55 @@ function chooseFlattestSite(
   }
 
   return best?.position ?? null;
+}
+
+/** Record a reservation over this ground, in this agent's name. */
+function claimGround(ctx: Ctx, region: Region): void {
+  ctx.store.db
+    .prepare(
+      `INSERT INTO reservations (id, agent_id, min_x, min_y, min_z, max_x, max_y, max_z,
+                                purpose, created_at_ticks, expires_at_ticks)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      ctx.store.ids.next('resv'),
+      ctx.agent.id,
+      region.min.x,
+      region.min.y,
+      region.min.z,
+      region.max.x,
+      region.max.y,
+      region.max.z,
+      `${ctx.goal.kind}:${ctx.goal.id}`,
+      ctx.time.totalTicks,
+      // Expiry so a dead agent can't hold a build site forever.
+      ctx.time.totalTicks + 12_000,
+    );
+}
+
+/**
+ * Is this ground already someone's — a structure standing on it, or a live
+ * reservation held by another settler?
+ *
+ * Asked of the shared record rather than of anyone's beliefs: a reservation is
+ * public, which is what makes it a coordination primitive (ADR-0005).
+ */
+function groundIsTaken(ctx: Ctx, footprint: Region): boolean {
+  if (ctx.store.structures.overlapping(footprint).length > 0) return true;
+
+  const held = ctx.store.db
+    .prepare(
+      `SELECT min_x, min_y, min_z, max_x, max_y, max_z FROM reservations
+        WHERE expires_at_ticks > ? AND agent_id <> ?`,
+    )
+    .all(ctx.time.totalTicks, ctx.agent.id);
+
+  return held.some((row) =>
+    regionsOverlap(footprint, {
+      min: { x: Number(row.min_x), y: Number(row.min_y), z: Number(row.min_z) },
+      max: { x: Number(row.max_x), y: Number(row.max_y), z: Number(row.max_z) },
+    }),
+  );
 }
 
 function locationKindFor(structureType: string): LocationKind {

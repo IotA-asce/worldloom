@@ -34,6 +34,7 @@ import {
   type Weather,
 } from '../../core/world.ts';
 import { isDaylight, phaseOf, TICKS_PER_DAY } from '../../persistence/repositories/simulation.ts';
+import { ARRIVAL_TOLERANCE, traverse, type HeightAt } from '../traversal.ts';
 import {
   boundVisibleResources,
   BUILD_COMPLETION_THRESHOLD,
@@ -70,6 +71,30 @@ const MAX_SURVEY_CELLS = 16_384;
 /** Terrain an agent can traverse in one step. */
 const MAX_STEP_UP = 1;
 const MAX_STEP_DOWN = 4;
+/**
+ * How far an agent routes in one action, and how far off the straight line it may
+ * stray to get around something. Together these bound the heightmap survey each
+ * move pays for: a 96-block leg with a 24-block margin is one survey of roughly
+ * 144×72 columns, which is a single bridge call rather than a per-step probe.
+ */
+const LEG_BLOCKS = 96;
+const ROUTE_MARGIN = 24;
+
+/**
+ * The end of this leg: the destination when it is close enough, otherwise a point
+ * `LEG_BLOCKS` along the way. Long journeys happen over several actions, which is
+ * both cheaper and more honest than crossing a continent inside one tick.
+ */
+function legTarget(from: Position, to: Position): Position {
+  const total = horizontalDistance(from, to);
+  if (total <= LEG_BLOCKS) return to;
+  const t = LEG_BLOCKS / total;
+  return {
+    x: Math.round(from.x + (to.x - from.x) * t),
+    y: to.y,
+    z: Math.round(from.z + (to.z - from.z) * t),
+  };
+}
 
 /** How far below the surface to expect rock. */
 const SUBSURFACE_ROCK_DEPTH = 5;
@@ -236,47 +261,46 @@ export class MinecraftEnvironment implements Environment {
 
   async moveAgent(agent: AgentView, to: Position): Promise<Result<MoveResult>> {
     const from = agent.position;
-    const total = horizontalDistance(from, to);
-    if (total < 1) return ok({ from, to: from, distance: 0, arrived: true });
+    if (horizontalDistance(from, to) < 1) return ok({ from, to: from, distance: 0, arrived: true });
 
-    // Read the real height profile along the route. An agent may not walk
-    // through a mountain just because Worldloom moved a number (ADR-0003).
-    const profile = await this.routeProfile(from, to);
-    if (!profile.ok) return profile;
+    // Route over the real terrain, one leg at a time. An agent may not walk
+    // through a mountain just because Worldloom moved a number (ADR-0003), and it
+    // must be able to walk *around* one — the same bounded search the fake
+    // environment uses, so movement obeys one set of rules everywhere.
+    const leg = legTarget(from, to);
+    const corridor = await this.routeHeights(from, leg);
+    if (!corridor.ok) return corridor;
 
-    let current = from;
-    for (const step of profile.value) {
-      const climb = step.y - current.y;
-      if (climb > MAX_STEP_UP || climb < -MAX_STEP_DOWN) {
-        const travelled = horizontalDistance(from, current);
-        if (travelled < 1) {
-          return fail(
-            'PATH_BLOCKED',
-            `impassable terrain ahead: a ${climb > 0 ? 'rise' : 'drop'} of ${Math.abs(climb)} blocks at ` +
-              `(${step.x}, ${step.y}, ${step.z})`,
-            { observed: { blockedAt: step, climb } },
-          );
-        }
-        // Partial progress is a success the planner can build on.
-        await this.placeMarker(agent, current);
-        return ok({ from, to: current, distance: travelled, arrived: false });
-      }
-      current = { x: step.x, y: step.y, z: step.z };
+    const walked = traverse(from, leg, corridor.value, {
+      maxStepUp: MAX_STEP_UP,
+      maxStepDown: MAX_STEP_DOWN,
+      searchMargin: ROUTE_MARGIN,
+      maxSteps: LEG_BLOCKS,
+    });
+
+    if (walked.blockedAt !== null) {
+      return fail(
+        'PATH_BLOCKED',
+        `walled in at (${String(from.x)}, ${String(from.y)}, ${String(from.z)}) — no walkable ground in any direction`,
+        { observed: { blockedAt: walked.blockedAt } },
+      );
     }
 
     if (this.embodiment === 'piloted') {
       // A real player can actually walk; the bridge's move_to is steering rather
-      // than pathfinding (C4), so the terrain check above still did the routing.
-      const walked = await this.send('move_to', { x: current.x, y: current.y, z: current.z });
-      if (!walked.ok) return walked;
+      // than pathfinding (C4), so the search above did the routing.
+      const moved = await this.send('move_to', { x: walked.to.x, y: walked.to.y, z: walked.to.z });
+      if (!moved.ok) return moved;
     }
 
-    await this.placeMarker(agent, current);
+    await this.placeMarker(agent, walked.to);
     return ok({
       from,
-      to: current,
-      distance: horizontalDistance(from, current),
-      arrived: horizontalDistance(current, to) <= 1.5,
+      to: walked.to,
+      distance: walked.distance,
+      // Arrival is judged against where the agent was actually going, not against
+      // the end of this leg.
+      arrived: horizontalDistance(walked.to, to) <= ARRIVAL_TOLERANCE,
     });
   }
 
@@ -521,43 +545,47 @@ export class MinecraftEnvironment implements Environment {
 
   // ── Sensing helpers ───────────────────────────────────────────────────────
 
-  private async routeProfile(
-    from: Position,
-    to: Position,
-  ): Promise<Result<{ x: number; y: number; z: number }[]>> {
-    const total = Math.ceil(horizontalDistance(from, to));
-    const points: { x: number; z: number }[] = [];
-    for (let i = 1; i <= total; i++) {
-      const t = i / total;
-      points.push({
-        x: Math.round(from.x + (to.x - from.x) * t),
-        z: Math.round(from.z + (to.z - from.z) * t),
-      });
-    }
-
-    // One heightmap over the route's bounding box is far cheaper than a
-    // get_block_at per step.
-    const xs = points.map((p) => p.x);
-    const zs = points.map((p) => p.z);
+  /**
+   * A walkable-height lookup over the corridor between two points.
+   *
+   * One heightmap survey, then a synchronous closure the pathfinder can call
+   * thousands of times for free. Columns outside the corridor read as unwalkable,
+   * which is what keeps the search — and the survey paying for it — bounded.
+   */
+  private async routeHeights(from: Position, to: Position): Promise<Result<HeightAt>> {
     const box: Region = {
-      min: { x: Math.min(...xs, from.x) - 1, y: MIN_ELEVATION, z: Math.min(...zs, from.z) - 1 },
-      max: { x: Math.max(...xs, from.x) + 1, y: MAX_ELEVATION, z: Math.max(...zs, from.z) + 1 },
+      min: {
+        x: Math.min(from.x, to.x) - ROUTE_MARGIN,
+        y: MIN_ELEVATION,
+        z: Math.min(from.z, to.z) - ROUTE_MARGIN,
+      },
+      max: {
+        x: Math.max(from.x, to.x) + ROUTE_MARGIN,
+        y: MAX_ELEVATION,
+        z: Math.max(from.z, to.z) + ROUTE_MARGIN,
+      },
     };
     const survey = await this.surveyRegion(box, 1);
     if (!survey.ok) return survey;
 
     const heights = new Map<string, number>();
-    for (const cell of survey.value.cells) heights.set(`${cell.x},${cell.z}`, cell.y);
+    for (const cell of survey.value.cells) {
+      // Standing in water is not walking, so those columns are simply absent —
+      // the search routes around a lake rather than across it.
+      if (cell.surface === 'water') continue;
+      heights.set(`${String(cell.x)},${String(cell.z)}`, cell.y);
+    }
 
-    return ok(
-      points.map((p) => ({
-        x: p.x,
-        // Stand on top of the surface block; fall back to the origin's own
-        // elevation for a cell the survey somehow missed.
-        y: (heights.get(`${p.x},${p.z}`) ?? from.y - 1) + 1,
-        z: p.z,
-      })),
-    );
+    // The agent's own column may be missing from a survey that clipped it; it is
+    // standing there, so it is walkable by observation.
+    const startKey = `${String(Math.round(from.x))},${String(Math.round(from.z))}`;
+    if (!heights.has(startKey)) heights.set(startKey, from.y - 1);
+
+    // The corridor survey is a heightmap, so this answers from the open surface
+    // and ignores the walker's own elevation. That is right for terrain and wrong
+    // inside a building; the marker-based embodiment does not put agents indoors,
+    // and reading clearance per column would cost a block query each.
+    return ok((x, z) => heights.get(`${String(x)},${String(z)}`) ?? null);
   }
 
   private visibleResources(survey: TerrainSurvey): VisibleResource[] {

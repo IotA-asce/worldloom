@@ -186,10 +186,10 @@ describe('movement is constrained by real terrain', () => {
     assert.equal(result.distance, 0);
   });
 
-  it('refuses to walk through a wall it cannot climb', async () => {
+  it('walks around a wall rather than stopping dead at it', async () => {
     const env = await connected(flatEnvironment());
     const ground = env.world.terrainHeight(0, 0);
-    // Build a 6-block wall across the route.
+    // A 9-block wall across the route, with open ground either side of it.
     for (let dy = 1; dy <= 6; dy++) {
       for (let z = -4; z <= 4; z++) {
         env.world.setBlock(position(5, ground + dy, z), {
@@ -201,11 +201,38 @@ describe('movement is constrained by real terrain', () => {
     }
 
     const start = agentAt(0, ground + 1, 0);
-    const result = await env.moveAgent(start, position(20, ground + 1, 0));
-    // Either refused outright or stopped short — never teleported through.
+    const result = expect(await env.moveAgent(start, position(20, ground + 1, 0)), 'move');
+
+    // The old local steering wedged here forever — every candidate step it
+    // considered was forward into the wall. Going round is what a walker does.
+    assert.ok(result.arrived, `stopped at ${JSON.stringify(result.to)} instead of going round`);
+    assert.ok(
+      env.world.blockAt(position(5, ground + 1, result.to.z)).solid ||
+        Math.abs(result.to.z) > 4 ||
+        result.to.x >= 20,
+      'arrived, so it must have passed either side of the wall',
+    );
+  });
+
+  it('refuses to cross a ridge with no way around', async () => {
+    const env = await connected(flatEnvironment());
+    const ground = env.world.terrainHeight(0, 0);
+    // Wide enough that the detour is outside anything the router will consider.
+    for (let dy = 1; dy <= 6; dy++) {
+      for (let z = -200; z <= 200; z++) {
+        env.world.setBlock(position(5, ground + dy, z), {
+          surface: 'stone',
+          yields: 'stone',
+          solid: true,
+        });
+      }
+    }
+
+    const result = await env.moveAgent(agentAt(0, ground + 1, 0), position(20, ground + 1, 0));
+    // Either refused outright or stopped short — never through.
     if (result.ok) {
-      assert.ok(!result.value.arrived, 'the agent must not pass the wall');
-      assert.ok(result.value.to.x < 5, `stopped at x=${result.value.to.x}, past the wall`);
+      assert.ok(!result.value.arrived, 'the agent must not pass the ridge');
+      assert.ok(result.value.to.x < 5, `stopped at x=${String(result.value.to.x)}, past the ridge`);
     } else {
       assert.equal(result.failure.kind, 'PATH_BLOCKED');
     }
@@ -215,7 +242,7 @@ describe('movement is constrained by real terrain', () => {
     const env = await connected(flatEnvironment());
     const ground = env.world.terrainHeight(0, 0);
     for (let dy = 1; dy <= 6; dy++) {
-      for (let z = -4; z <= 4; z++) {
+      for (let z = -200; z <= 200; z++) {
         env.world.setBlock(position(12, ground + dy, z), { surface: 'stone', yields: 'stone', solid: true });
       }
     }
@@ -225,16 +252,23 @@ describe('movement is constrained by real terrain', () => {
       'move',
     );
     assert.ok(!result.arrived);
-    assert.ok(result.distance > 5, `expected real progress, got ${result.distance}`);
+    assert.ok(result.distance > 5, `expected real progress, got ${String(result.distance)}`);
   });
 
-  it('fails with PATH_BLOCKED when blocked immediately', async () => {
+  it('fails with PATH_BLOCKED only when there is nowhere at all to step', async () => {
     const env = await connected(flatEnvironment());
     const ground = env.world.terrainHeight(0, 0);
+    // Wall the agent in on all eight sides. Anything less than this is a detour,
+    // not a blockage, and reporting it as failure is what wedged agents for good.
     for (let dy = 1; dy <= 8; dy++) {
-      for (let x = 1; x <= 3; x++) {
-        for (let z = -3; z <= 3; z++) {
-          env.world.setBlock(position(x, ground + dy, z), { surface: 'stone', yields: 'stone', solid: true });
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          if (dx === 0 && dz === 0) continue;
+          env.world.setBlock(position(dx, ground + dy, dz), {
+            surface: 'stone',
+            yields: 'stone',
+            solid: true,
+          });
         }
       }
     }
