@@ -516,7 +516,16 @@ async function selectSite(
     { x: anchor.x + params.searchRadius, y: anchor.y + 32, z: anchor.z + params.searchRadius },
   );
 
-  const survey = await ctx.environment.surveyRegion(searchRegion, 2);
+  // The environment caps how many cells one survey may return, so a widening
+  // search has to sample more coarsely rather than more densely. A fixed fine
+  // resolution works until the radius passes ~120 blocks, at which point the
+  // survey itself is refused and the settler cannot even *look* at the ground
+  // it was sent to find — the late-attempt surveys of a long siting search
+  // failed BAD_ARGS without ever seeing a cell.
+  const maxCells = ctx.environment.describe().maxSurveyCells;
+  const side = Math.floor(Math.sqrt(maxCells));
+  const resolution = Math.max(2, Math.ceil((2 * params.searchRadius + 1) / side));
+  const survey = await ctx.environment.surveyRegion(searchRegion, resolution);
   if (!survey.ok) return survey;
 
   const site = chooseFlattestSite(
