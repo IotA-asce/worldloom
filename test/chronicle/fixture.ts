@@ -124,6 +124,12 @@ export const SAMPLE_PAYLOADS: { readonly [T in EventType]: EventPayloads[T] } = 
     verifiedSample: 24,
   },
   resource_spent: { agentId: MIRA, resources: { wood: 20 }, reason: 'building the shelter' },
+  resource_withdrawn: {
+    agentId: MIRA,
+    settlementId: SETTLEMENT,
+    resources: { wood: 12 },
+    reason: 'building the shelter',
+  },
   resource_transferred: {
     fromAgentId: ARUN,
     toAgentId: MIRA,

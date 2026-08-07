@@ -159,6 +159,13 @@ const RENDERERS: RendererMap = {
         `on day ${String(event.day)} for ${event.payload.reason}`,
     ),
 
+  // Drawing on the settlement's shared store, rather than one's own gathering.
+  resource_withdrawn: (event, names) =>
+    sentence(
+      `${names.nameOf(event.payload.agentId)} drew ${formatBundle(event.payload.resources)} ` +
+        `from the settlement's stores on day ${String(event.day)} for ${event.payload.reason}`,
+    ),
+
   resource_transferred: (event, names) =>
     sentence(
       `${names.nameOf(event.payload.fromAgentId)} handed ` +
