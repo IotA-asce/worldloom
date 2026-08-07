@@ -249,6 +249,95 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX llm_calls_day_idx      ON llm_calls (day);
     `,
   },
+  {
+    version: 2,
+    name: 'civilization',
+    sql: `
+      -- Civilization-level state, kept separate from any agent's private beliefs
+      -- (requirement 19). These tables hold *observable public facts* — that a
+      -- structure exists, that a project is claimed — not what anyone thinks.
+      CREATE TABLE settlements (
+        id            TEXT    PRIMARY KEY,
+        name          TEXT    NOT NULL,
+        objective     TEXT    NOT NULL,
+        founding_day  INTEGER NOT NULL,
+        center_x      REAL    NOT NULL,
+        center_y      REAL    NOT NULL,
+        center_z      REAL    NOT NULL,
+        status        TEXT    NOT NULL DEFAULT 'active'
+      ) STRICT;
+
+      -- A structure exists because a build was verified. The event ledger is
+      -- still authoritative; this is the queryable projection of it.
+      CREATE TABLE structures (
+        id                TEXT    PRIMARY KEY,
+        settlement_id     TEXT REFERENCES settlements (id) ON DELETE SET NULL,
+        type              TEXT    NOT NULL,
+        blueprint         TEXT    NOT NULL,
+        min_x INTEGER NOT NULL, min_y INTEGER NOT NULL, min_z INTEGER NOT NULL,
+        max_x INTEGER NOT NULL, max_y INTEGER NOT NULL, max_z INTEGER NOT NULL,
+        builders          TEXT    NOT NULL DEFAULT '[]',  -- JSON array of agent ids
+        purpose           TEXT    NOT NULL DEFAULT '',
+        -- planned | building | complete | damaged | ruined
+        state             TEXT    NOT NULL DEFAULT 'complete',
+        created_at_day    INTEGER NOT NULL,
+        created_at_ticks  INTEGER NOT NULL,
+        verified_at_ticks INTEGER
+      ) STRICT;
+
+      CREATE INDEX structures_type_idx       ON structures (type);
+      CREATE INDEX structures_settlement_idx ON structures (settlement_id, state);
+
+      -- Shared work the settlement wants doing. Distinct from an agent's goal:
+      -- a project outlives whoever is currently working on it, which is what
+      -- lets several agents contribute to one shelter instead of five.
+      CREATE TABLE projects (
+        id                 TEXT    PRIMARY KEY,
+        settlement_id      TEXT    NOT NULL REFERENCES settlements (id) ON DELETE CASCADE,
+        kind               TEXT    NOT NULL,
+        blueprint          TEXT,
+        requirements       TEXT    NOT NULL DEFAULT '{}',  -- JSON ResourceBundle
+        site_x INTEGER, site_y INTEGER, site_z INTEGER,
+        -- proposed | active | blocked | completed | abandoned
+        state              TEXT    NOT NULL DEFAULT 'proposed',
+        priority           REAL    NOT NULL DEFAULT 0.5,
+        reason             TEXT    NOT NULL DEFAULT '',
+        created_at_day     INTEGER NOT NULL,
+        created_at_ticks   INTEGER NOT NULL,
+        completed_at_ticks INTEGER,
+        structure_id       TEXT REFERENCES structures (id) ON DELETE SET NULL
+      ) STRICT;
+
+      CREATE INDEX projects_state_idx ON projects (settlement_id, state);
+
+      -- Who has taken on which part of a project. This is the public
+      -- announcement of intent that division of labour rests on (requirement 18)
+      -- — agents read claims, never each other's private plans.
+      CREATE TABLE project_claims (
+        project_id        TEXT    NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+        agent_id          TEXT    NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        role              TEXT    NOT NULL,
+        claimed_at_ticks  INTEGER NOT NULL,
+        released_at_ticks INTEGER,
+        PRIMARY KEY (project_id, agent_id)
+      ) STRICT;
+
+      CREATE INDEX project_claims_agent_idx ON project_claims (agent_id, released_at_ticks);
+
+      -- Generated history. The event_ids column is the evidence each entry was
+      -- built from, so any sentence can be traced back to the ledger (ADR-0009).
+      CREATE TABLE chronicle_entries (
+        id           TEXT    PRIMARY KEY,
+        day          INTEGER NOT NULL UNIQUE,
+        title        TEXT    NOT NULL,
+        prose        TEXT    NOT NULL,
+        event_ids    TEXT    NOT NULL DEFAULT '[]',  -- JSON array
+        -- narrated (model prose, verified) | rendered (deterministic fallback)
+        source       TEXT    NOT NULL DEFAULT 'rendered',
+        generated_at INTEGER NOT NULL
+      ) STRICT;
+    `,
+  },
 ];
 
 /** Highest migration version this build knows about. */
