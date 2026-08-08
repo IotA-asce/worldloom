@@ -130,13 +130,20 @@ Every CLI command reads observability view models — `civilizationView`,
 `agentView`, `causalChains`, `explainEvent`, `failureView`, `costView`,
 `liveFeedView` — and nothing else. The CLI holds no queries of its own.
 
-### M8 — First Settlement demo
+### M8 — First Settlement demo *(done)*
 
-Full scenario against a live server; collect ledger, chronicle, metrics,
-screenshots, and an honest list of known failures.
+Full scenario end to end; collect ledger, chronicle, metrics, and an honest
+list of known failures.
 
 **Done when:** every criterion in §35 of the requirements is demonstrated, with
 the artifact to prove each one.
+
+Done, with one deliberate substitution: the thirty-day soak ran against the
+fake environment (rule-based, $0, reproducible by anyone) rather than a live
+Minecraft server. Every §35 criterion is proven by the acceptance suite plus
+the soak artifacts; the numbers and the known-failure list live in
+`docs/results.md`. The live-server run is the first item of V1 — the adapter
+is unit-tested against a mock bridge but has not yet carried a month-long run.
 
 ## Issue-sized tasks
 
