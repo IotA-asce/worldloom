@@ -11,17 +11,18 @@ Minecraft is the first environment Worldloom plugs into. It is not what
 Worldloom is about; it is simply somewhere visible for these processes to
 happen.
 
-> **Status: V0 runs, end to end.** Five agents observe a world, set themselves
-> goals, plan, gather verified resources, found a settlement, build and verify
+> **Status: V0 complete.** Five agents observe a world, set themselves goals,
+> plan, gather verified resources, found a settlement, build and verify
 > structures together, talk, remember what happened, replan when they fail, and
 > resume after a restart — and the run ends in a chronicle whose every sentence
-> cites the ledger. All seven V0 success criteria run as one acceptance test
-> (`node --test --import tsx test/v0-acceptance.test.ts`), and the whole thing
-> works with **no API key** via the rule-based provider.
+> cites the ledger. All seven V0 success criteria run as one acceptance test,
+> and the whole thing works with **no API key** via the rule-based provider.
 >
-> The honest numbers, including what still doesn't work, are in
-> [docs/results.md](docs/results.md); the milestone history is in
-> [docs/v0-plan.md](docs/v0-plan.md).
+> The thirty-day soak: 31,624 ledger events, 967 messages between settlers,
+> 4,419 decisions, shelter, storage and farm standing at three distinct sites —
+> at $0. The honest numbers, including what still doesn't work, are in
+> [docs/results.md](docs/results.md); how it was built, including every failure
+> that shaped it, is in [docs/v0-process.md](docs/v0-process.md).
 
 ## Why it exists
 
@@ -131,7 +132,7 @@ npm run start:server
 # in worldloom/
 cp worldloom.example.yaml worldloom.yaml
 export ANTHROPIC_API_KEY=...          # optional; omit to run rule-based
-npm run dev -- run scenarios/first-settlement
+npm run dev -- run --config worldloom.yaml
 ```
 
 No Minecraft client and no player need to be online. Join the server if you want
@@ -143,9 +144,11 @@ Inspect a running or finished civilization (point `--config` at whatever the
 run used):
 
 ```bash
+npm run dev -- status --config scenarios/first-settlement.yaml
 npm run dev -- inspect --config scenarios/first-settlement.yaml
 npm run dev -- why mira --config scenarios/first-settlement.yaml
 npm run dev -- events --day 4 --config scenarios/first-settlement.yaml
+npm run dev -- failures --config scenarios/first-settlement.yaml
 npm run dev -- chronicle --generate --config scenarios/first-settlement.yaml
 npm run dev -- costs --config scenarios/first-settlement.yaml
 ```
@@ -177,18 +180,22 @@ Mira: ate 4 food
 ```
 
 Every number there is real: the 60 wood was credited from blocks confirmed
-removed from the world, the shelter cost exactly those resources from Mira's
+removed from the world, the shelter cost exactly those resources from the
 ledger, and the failure genuinely reached the planner.
 
+And the chronicle the thirty-day soak produced — actual output of
+`worldloom chronicle --generate`, trimmed to its first entry:
+
 ```
-CHRONICLE
+Day 0: the first day
+====================
 
-Day 1 — Arrival
-Five settlers established their first camp overlooking the western bay.
-
-Day 2 — The Northern Ridge
-Arun discovered a deposit of exposed iron north of the settlement and
-returned with news of the find.
+... the settlement of Aurelian Reach was founded at (-64, 70, -48), to
+Establish a self-sustaining settlement. Arun, Explorer, arrived at
+(-60, 73, -48) on day 0. ... Arun completed the shelter at (-148, 72, -128)
+on day 0, for somewhere safe to sleep. Arun completed the storage at
+(-92, 70, -22) on day 0, for keeping the settlement's supplies. Sam completed
+the farm at (-96, 70, -13) on day 0, for growing food.
 ```
 
 Every name, coordinate and day in a chronicle entry is verified against the
@@ -196,17 +203,33 @@ events it was generated from. If it isn't in the ledger, it cannot appear.
 
 ## Roadmap
 
-**V0 — The First Settlement** (current): five agents, one settlement, memory,
-relationships, division of labour, chronicle, restart persistence.
-Milestones and issue-sized tasks in [docs/v0-plan.md](docs/v0-plan.md).
+**V0 — The First Settlement** (done): five agents, one settlement, memory,
+relationships, division of labour, chronicle, restart persistence — proven by
+the acceptance suite and the recorded soak.
+
+**V1**, in the order the soak's failure table hands them out: a month-long run
+against a live Minecraft server (the adapter's real proving ground) → foraging
+that rotates known grounds instead of churning → terrain-pocket recovery with
+memory → a chronicle importance bar that lets steady work be seen.
 
 **Beyond V0**, in roughly the order the architecture is meant to support:
 specialisation → trade → economies → institutions → laws → politics → factions →
 culture → history. Plus additional environments (Godot, Unity, Webots) behind
 the same port.
 
-Deliberately *not* in V0: reproduction, genetics, large populations,
+Deliberately *not* in scope yet: reproduction, genetics, large populations,
 governments, warfare, currencies, multiple settlements, reinforcement learning.
+
+## Documentation
+
+| | |
+|---|---|
+| [docs/results.md](docs/results.md) | The V0 soak: every success criterion with its artifact, and the honest failure list |
+| [docs/v0-process.md](docs/v0-process.md) | How V0 was built — the method, the milestones, and every soak failure that shaped it |
+| [docs/v0-plan.md](docs/v0-plan.md) | The milestone plan, with the evidence each closed on |
+| [docs/architecture.md](docs/architecture.md) | The system in full |
+| [docs/minecraft-integration.md](docs/minecraft-integration.md) | The bridge layer's constraints, and how they shaped the adapter |
+| [docs/adr/](docs/adr/) | Eleven architecture decision records |
 
 ## Contributing
 
