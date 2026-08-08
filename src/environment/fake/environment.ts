@@ -228,6 +228,10 @@ export class FakeEnvironment implements Environment {
    * every column of it — so five settlers who walked inside to sleep found every
    * neighbouring column four blocks up and were sealed in by the shelter they
    * built. A run showed exactly that: all five at one coordinate, walled in.
+   *
+   * `fromY` is the walker's feet level — one above the block they stand on —
+   * which is how a doorway floor one block above the ground outside is an
+   * honest step up rather than a wall.
    */
   private walkableHeight(x: number, z: number, fromY: number): number | null {
     const feetFrom = Math.floor(fromY);

@@ -22,7 +22,7 @@ import type { Observation } from '../environment/port.ts';
 import type { ReasoningProvider } from '../reasoning/provider.ts';
 import { type WorldloomConfig } from '../core/config.ts';
 import { describeFailure, ok, type ActionFailure, type Result } from '../core/result.ts';
-import { formatPosition, type ResourceBundle, type WorldTime } from '../core/world.ts';
+import { formatPosition, horizontalDistance, regionCenter, type Position, type ResourceBundle, type WorldTime } from '../core/world.ts';
 import { executeStep } from '../goals/actions.ts';
 import {
   canTransition,
@@ -36,6 +36,7 @@ import {
   describePlan,
   failStep,
   markStepActive,
+  noteStepProgress,
   skipStep,
   type Plan,
 } from '../goals/plan.ts';
@@ -76,6 +77,13 @@ const GOAL_SYSTEM_PROMPT = [
 /** Ticks a step making *partial progress* may spend before it counts as stalled.
  *  Held states (resting) are exempt — see the `heldState` check where it is used. */
 const MAX_STEP_CONTINUATIONS = 8;
+
+/**
+ * Blocks of ground a step must cover in a tick for the tick to count as
+ * progress rather than stalling. A full travel leg is 96 blocks; terrain can
+ * halve that and still be a walk, not a wedge.
+ */
+const MIN_PROGRESS_BLOCKS = 8;
 
 const RECOVERY_SYSTEM_PROMPT = [
   'A settler\'s plan has failed. Decide whether to retry the same step, replan the goal,',
@@ -211,7 +219,22 @@ export async function tickAgent(agentId: Agent['id'], deps: TickDeps): Promise<R
     // "sleeping" into a pathfinding failure and replans the agent out of bed.
     const heldState = step.action === 'rest';
 
-    if (!heldState && attempts >= MAX_STEP_CONTINUATIONS) {
+    // Distance covered this tick is the difference between a long journey and
+    // a wedge. The executor fails a travel that makes no headway on its own;
+    // what remains is slow going — sub-leg terrain, a block or two a tick — and
+    // only *that* may count toward the stall ceiling. Counting every tick of a
+    // 500-block walk as stalling replanned settlers out of a perfectly good
+    // hike until the goal was abandoned: 509 abandoned walks home in one run.
+    const movedTo = outcome.value.agentPatch?.position;
+    const progress =
+      movedTo === undefined ? 0 : horizontalDistance(integrated.position, movedTo);
+
+    if (progress >= MIN_PROGRESS_BLOCKS && attempts > 1) {
+      plan = noteStepProgress(plan, step.index);
+      store.plans.update(plan);
+    }
+
+    if (!heldState && progress < MIN_PROGRESS_BLOCKS && attempts >= MAX_STEP_CONTINUATIONS) {
       const stalled: ActionFailure = {
         kind: 'PATH_BLOCKED',
         detail: `still not there after ${attempts} attempts`,
@@ -752,6 +775,27 @@ function rememberStep(
 
 // ── Context assembly ────────────────────────────────────────────────────────
 
+/**
+ * Where this agent can go for shelter, or null when there is none to know of.
+ *
+ * A settler knows where home is even if nobody walked them to the door: the
+ * settlement's record of its standing shelter is shared by the people who live
+ * there, the same way the founding made the centre common knowledge. Without
+ * this, "go inside at night" failed for everyone but the builder.
+ */
+function knownShelterPosition(agent: Agent, deps: TickDeps): Position | null {
+  const known = deps.store.knowledge.nearestLocation(agent.id, 'shelter', agent.position);
+  if (known !== null) return known.position;
+  const standing = deps.store.structures.ofType('shelter')[0];
+  if (standing === undefined) return null;
+  // Aim at the floor, not the middle of the building: the region's centre is
+  // inside the roofline, and a walker told to reach it can only press against
+  // the walls until the goal is written off — 509 abandoned walks home in one
+  // run, every one of them ending at the hut's own wall.
+  const center = regionCenter(standing.region);
+  return { x: center.x, y: standing.region.min.y, z: center.z };
+}
+
 function planningContext(
   agent: Agent,
   observation: Observation,
@@ -759,13 +803,11 @@ function planningContext(
   deps: TickDeps,
   retrieved: ReturnType<typeof retrieve>,
 ): PlanningContext {
-  const shelter = deps.store.knowledge.nearestLocation(agent.id, 'shelter', agent.position);
-
   return {
     agent,
     time,
     knownResources: deps.store.knowledge.knownResources(agent.id),
-    knownShelter: shelter?.position ?? null,
+    knownShelter: knownShelterPosition(agent, deps),
     settlementCenter: settlementCenter(deps.store),
     carrying: deps.store.ledger.balance(agentOwner(agent.id)),
     memories: retrievedContents(retrieved),
@@ -853,12 +895,11 @@ function retrieveForDecision(
 
 /** Context without a fresh observation, for replanning within a tick. */
 function planningContextFromStore(agent: Agent, time: WorldTime, deps: TickDeps): PlanningContext {
-  const shelter = deps.store.knowledge.nearestLocation(agent.id, 'shelter', agent.position);
   return {
     agent,
     time,
     knownResources: deps.store.knowledge.knownResources(agent.id),
-    knownShelter: shelter?.position ?? null,
+    knownShelter: knownShelterPosition(agent, deps),
     settlementCenter: settlementCenter(deps.store),
     carrying: deps.store.ledger.balance(agentOwner(agent.id)),
     memories: [],

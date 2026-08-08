@@ -19,6 +19,7 @@ import { position } from '../../src/core/world.ts';
 import { flatEnvironment } from '../../src/environment/fake/environment.ts';
 import { executeStep } from '../../src/goals/actions.ts';
 import type { Goal } from '../../src/goals/goal.ts';
+import { agentOwner } from '../../src/persistence/repositories/ledger.ts';
 import { Store } from '../../src/persistence/store.ts';
 
 function makeAgent(id: AgentId): Agent {
@@ -122,6 +123,150 @@ describe('select_site', () => {
       result.ok === false ? result.failure.detail : ''
     }`);
     assert.match(result.value.note ?? '', /chose a site/);
+
+    await environment.disconnect();
+    store.close();
+  });
+
+  it('chooses a site flush with the ground, not stacked on it', async () => {
+    // The origin becomes the build's base layer. Returned one block above the
+    // ground it surveyed, the hut floor stacked *on* the dirt — and wherever
+    // the door side fell away by one more, getting in was a two-block climb
+    // the walker rightly refuses. A diag world showed what that costs: 509
+    // abandoned seek_shelter goals, all ending PATH_BLOCKED at the hut wall.
+    const { result, store, environment, agent } = await selectSiteAt(40);
+
+    assert.ok(result.ok, 'siting should succeed on open flat ground');
+    const chosen = store.knowledge.knownLocations(agent.id, 'build_site')[0];
+    assert.ok(chosen !== undefined, 'the chosen site is on record');
+    assert.equal(
+      chosen.position.y,
+      environment.world.surfaceHeight(chosen.position.x, chosen.position.z),
+      'the build origin is the ground level itself, so the floor replaces the top block',
+    );
+
+    await environment.disconnect();
+    store.close();
+  });
+
+  it('refuses a site whose ground falls away beyond the footprint', async () => {
+    // A ledge site surveys flat across the footprint and builds fine — but its
+    // doorway ends up a two-block climb from outside, the walker refuses it,
+    // and the shelter stands unusable. One diag world: 511 seek_shelter goals
+    // abandoned PATH_BLOCKED at the hut wall. The ring around the footprint is
+    // part of the site.
+    const store = Store.openMemory(sequentialIdFactory());
+    store.simulation.initialise('siting-test', 1, 1_700_000_000_000);
+    const agent = makeAgent('agent_000001' as AgentId);
+    store.agents.insert(agent);
+    const environment = flatEnvironment();
+    await environment.connect();
+    const ground = environment.world.terrainHeight(0, 0);
+
+    // A flat-topped platform two blocks up, eight by eight: big enough that a
+    // footprint on it reads perfectly flat (and wins the raised-ground
+    // preference), small enough that the ring around any such footprint falls
+    // two blocks back to the plain.
+    for (let px = 8; px <= 15; px++) {
+      for (let pz = 8; pz <= 15; pz++) {
+        environment.world.setBlock(position(px, ground + 1, pz), { surface: 'stone', yields: 'stone', solid: true });
+        environment.world.setBlock(position(px, ground + 2, pz), { surface: 'stone', yields: 'stone', solid: true });
+      }
+    }
+
+    const result = await executeStep(
+      {
+        index: 0,
+        action: 'select_site',
+        params: { blueprint: 'small_shelter', near: position(10, 64, 10), searchRadius: 40 },
+        status: 'active',
+        attempts: 1,
+        failure: null,
+        note: null,
+      },
+      {
+        store,
+        environment,
+        agent: store.agents.get(agent.id),
+        goal: buildGoal(agent.id),
+        time: store.simulation.currentTime(),
+      },
+    );
+
+    assert.ok(result.ok, 'open ground surrounds the platform, so siting should succeed');
+    const chosen = store.knowledge.knownLocations(agent.id, 'build_site')[0];
+    assert.ok(chosen !== undefined, 'the chosen site is on record');
+    assert.equal(
+      chosen.position.y,
+      ground,
+      'a flat top ringed by a two-block drop is a ledge, not a site — it chose the honest flat',
+    );
+
+    await environment.disconnect();
+    store.close();
+  });
+
+  it('builds on the claimed site, not on the search anchor', async () => {
+    // The plan threads only the *anchor* through reserve/clear/place/verify —
+    // the site itself lives in the agent's knowledge. When those steps acted
+    // on the anchor, every structure went up on the settlement centre,
+    // stacked on top of the first one's walls.
+    const store = Store.openMemory(sequentialIdFactory());
+    store.simulation.initialise('siting-test', 1, 1_700_000_000_000);
+    const agent = makeAgent('agent_000001' as AgentId);
+    store.agents.insert(agent);
+    const environment = flatEnvironment();
+    await environment.connect();
+    const goal = buildGoal(agent.id);
+    const ctx = {
+      store,
+      environment,
+      agent: store.agents.get(agent.id),
+      goal,
+      time: store.simulation.currentTime(),
+    };
+
+    // The anchor is the agent's own position; the chosen site will be elsewhere.
+    const anchor = position(0, 64, 0);
+    const sited = await executeStep(
+      {
+        index: 0,
+        action: 'select_site',
+        params: { blueprint: 'small_shelter', near: anchor, searchRadius: 40 },
+        status: 'active',
+        attempts: 1,
+        failure: null,
+        note: null,
+      },
+      ctx,
+    );
+    assert.ok(sited.ok, 'siting should succeed on open flat ground');
+    const chosen = store.knowledge.knownLocations(agent.id, 'build_site')[0];
+    assert.ok(chosen !== undefined, 'the chosen site is on record');
+
+    // Pay for the build, then place it with `at: 'build_site'` as the plan does.
+    store.ledger.credit(agentOwner(agent.id), { wood: 60, stone: 25 });
+    const placed = await executeStep(
+      {
+        index: 4,
+        action: 'place_blueprint',
+        params: { blueprint: 'small_shelter', origin: anchor, at: 'build_site' },
+        status: 'active',
+        attempts: 1,
+        failure: null,
+        note: null,
+      },
+      ctx,
+    );
+
+    assert.ok(placed.ok, `the build should land: ${placed.ok === false ? placed.failure.detail : ''}`);
+    const started = store.events.query({ types: ['structure_started'] })[0];
+    const built = (started?.payload as { region: { min: { x: number; z: number } } }).region;
+    assert.deepEqual(
+      { x: built.min.x, z: built.min.z },
+      { x: chosen.position.x, z: chosen.position.z },
+      'the walls went up on the claimed ground, not on the anchor',
+    );
 
     await environment.disconnect();
     store.close();

@@ -374,6 +374,11 @@ function resolveTarget(target: TravelTarget, ctx: Ctx): Position | null {
       return best;
     }
     case 'location': {
+      // A build_site means *the site this plan claimed*, which is the most
+      // recently recorded one — the nearest could be a stale pick from an old
+      // goal, and walking to one site while building on another is how the
+      // settlement's structures ended up stacked on one footprint.
+      if (target.location === 'build_site') return chosenSite(ctx);
       const nearest = ctx.store.knowledge.nearestLocation(
         ctx.agent.id,
         target.location as LocationKind,
@@ -576,10 +581,59 @@ async function selectSite(
   });
 }
 
+/**
+ * The ground this plan is building on: the site its own select_site step most
+ * recently claimed. Everything after siting — reserving, clearing, placing,
+ * verifying — must act on *this* ground. These steps used to act on the search
+ * anchor instead (usually the settlement centre), which stacked every
+ * structure onto the first one's footprint and demolished the standing shelter
+ * every time another goal cleared the centre to rebuild on it.
+ */
+function chosenSite(ctx: Ctx): Position | null {
+  let best: Position | null = null;
+  let bestTicks = -1;
+  for (const site of ctx.store.knowledge.knownLocations(ctx.agent.id, 'build_site')) {
+    if (site.lastSeenAtTicks > bestTicks) {
+      best = site.position;
+      bestTicks = site.lastSeenAtTicks;
+    }
+  }
+  return best;
+}
+
+/** Resolve a build step's `at: 'build_site'` marker, or fail the step honestly. */
+function buildOrigin(ctx: Ctx, at: 'build_site' | undefined, fallback: Position): Result<Position> {
+  if (at !== 'build_site') return ok(fallback);
+  const site = chosenSite(ctx);
+  if (site === null) {
+    return fail('TARGET_CHANGED', 'the site I chose is no longer on record', {
+      retryable: false,
+    });
+  }
+  return ok(site);
+}
+
+/** The claim box around a chosen site — the planner's siteRegion shape. */
+function buildSiteRegion(origin: Position): Region {
+  // Room to work around the blueprint, but never *below* its base layer.
+  // Expanding the box downward made clear_site dig a two-block moat around
+  // every build — and a hut behind a moat has a doorway the walker cannot
+  // climb into, which is how one diag world's only shelter stood complete
+  // while 511 seek_shelter goals died PATH_BLOCKED against its wall.
+  return makeRegion(
+    { x: origin.x - 1, y: origin.y, z: origin.z - 1 },
+    { x: origin.x + 9, y: origin.y + 6, z: origin.z + 9 },
+  );
+}
+
 async function reserveRegion(
   params: ActionParams['reserve_region'],
   ctx: Ctx,
 ): Promise<Result<StepOutcome>> {
+  const origin = buildOrigin(ctx, params.at, params.region.min);
+  if (!origin.ok) return origin;
+  const region = params.at === 'build_site' ? buildSiteRegion(origin.value) : params.region;
+
   // Region reservations prevent two agents writing the same blocks (ADR-0005).
   // A refusal is a legitimate planning outcome, not an error.
   const held = ctx.store.db
@@ -594,7 +648,7 @@ async function reserveRegion(
       min: { x: Number(row.min_x), y: Number(row.min_y), z: Number(row.min_z) },
       max: { x: Number(row.max_x), y: Number(row.max_y), z: Number(row.max_z) },
     };
-    if (regionsOverlap(params.region, other)) {
+    if (regionsOverlap(region, other)) {
       return fail('REGION_RESERVED', `${String(row.agent_id)} is already working there`, {
         observed: { region: other, heldBy: row.agent_id },
         retryable: false,
@@ -602,7 +656,7 @@ async function reserveRegion(
     }
   }
 
-  claimGround(ctx, params.region);
+  claimGround(ctx, region);
   return ok({ note: 'claimed the site' });
 }
 
@@ -617,7 +671,11 @@ async function releaseRegion(
 }
 
 async function clearSite(params: ActionParams['clear_site'], ctx: Ctx): Promise<Result<StepOutcome>> {
-  const result = await ctx.environment.clearRegion(agentView(ctx.agent), params.region);
+  const origin = buildOrigin(ctx, params.at, params.region.min);
+  if (!origin.ok) return origin;
+  const region = params.at === 'build_site' ? buildSiteRegion(origin.value) : params.region;
+
+  const result = await ctx.environment.clearRegion(agentView(ctx.agent), region);
   if (!result.ok) return result;
   return ok({
     note: `cleared ${result.value.blocksPlaced} blocks of ground`,
@@ -633,6 +691,9 @@ async function placeBlueprint(
   if (blueprint === null) {
     return fail('BAD_ARGS', `unknown blueprint '${params.blueprint}'`, { retryable: false });
   }
+
+  const origin = buildOrigin(ctx, params.at, params.origin);
+  if (!origin.ok) return origin;
 
   const cost = blueprintCost(blueprint);
   const owner = agentOwner(ctx.agent.id);
@@ -670,7 +731,7 @@ async function placeBlueprint(
   }
 
   const structureId = ctx.store.ids.next('struct') as StructureId;
-  const region = blueprintRegion(blueprint, params.origin);
+  const region = blueprintRegion(blueprint, origin.value);
 
   ctx.store.transaction(() => {
     appendAll(ctx, [
@@ -687,7 +748,7 @@ async function placeBlueprint(
     ]);
   });
 
-  const built = await ctx.environment.build(agentView(ctx.agent), blueprint, params.origin);
+  const built = await ctx.environment.build(agentView(ctx.agent), blueprint, origin.value);
   if (!built.ok) return built;
 
   const result = built.value;
@@ -723,9 +784,17 @@ async function placeBlueprint(
   }
 
   return ok({
-    note: `built the ${structureTypeOf(params.blueprint)} at ${formatPosition(params.origin)}`,
+    note: `built the ${structureTypeOf(params.blueprint)} at ${formatPosition(origin.value)}`,
     agentPatch: { status: 'building', activity: `building the ${structureTypeOf(params.blueprint)}` },
   });
+}
+
+/** Where an agent can stand to use a structure: the middle of its floor. The
+ *  region's true centre is inside the roofline, and a walker told to reach it
+ *  presses against the walls until the goal is written off. */
+function floorCenter(region: Region): Position {
+  const center = regionCenter(region);
+  return { x: center.x, y: region.min.y, z: center.z };
 }
 
 async function verifyStructure(
@@ -737,9 +806,12 @@ async function verifyStructure(
     return fail('BAD_ARGS', `unknown blueprint '${params.blueprint}'`, { retryable: false });
   }
 
+  const origin = buildOrigin(ctx, params.at, params.origin);
+  if (!origin.ok) return origin;
+
   // Read the world back rather than trusting the build report — silent write
   // failures are a real possibility (constraint C5).
-  const verified = await ctx.environment.verifyBuild(blueprint, params.origin);
+  const verified = await ctx.environment.verifyBuild(blueprint, origin.value);
   if (!verified.ok) return verified;
 
   if (!verified.value.complete) {
@@ -763,7 +835,7 @@ async function verifyStructure(
     ctx.store.structures.addBuilder(already.id, ctx.agent.id);
     ctx.store.knowledge.rememberLocation({
       agentId: ctx.agent.id,
-      position: regionCenter(already.region),
+      position: floorCenter(already.region),
       kind: locationKindFor(type),
       confidence: 1,
       source: OBSERVED,
@@ -800,7 +872,7 @@ async function verifyStructure(
     // "seek shelter" goal actually go somewhere.
     ctx.store.knowledge.rememberLocation({
       agentId: ctx.agent.id,
-      position: regionCenter(verified.value.region),
+      position: floorCenter(verified.value.region),
       kind: locationKindFor(type),
       confidence: 1,
       source: OBSERVED,
@@ -1048,20 +1120,49 @@ function chooseFlattestSite(
     if (
       taken(
         makeRegion(
-          { x: cell.x, y: cell.y + 1, z: cell.z },
-          { x: cell.x + width, y: cell.y + 1, z: cell.z + depth },
+          { x: cell.x, y: cell.y, z: cell.z },
+          { x: cell.x + width, y: cell.y, z: cell.z + depth },
         ),
       )
     ) {
       continue;
     }
 
+    // A flat footprint is not enough: the ground around it must not fall away.
+    // A hut on a ledge edge verifies fine, but its doorway is a two-block climb
+    // from outside — which the walker rightly refuses, so the settlement's only
+    // shelter stood unusable while 511 seek_shelter goals died PATH_BLOCKED
+    // against its wall. Probe one ring beyond the footprint and refuse ledges
+    // (and moats); a one-block shoulder is an honest step and stays welcome.
+    let ring = 0;
+    let ledged = false;
+    for (const dx of [...xOffsets, -step, width + step]) {
+      for (const dz of [...zOffsets, -step, depth + step]) {
+        if (xOffsets.includes(dx) && zOffsets.includes(dz)) continue;
+        const neighbour = byKey.get(`${cell.x + dx},${cell.z + dz}`);
+        if (neighbour === undefined) continue;
+        ring++;
+        if (neighbour.surface === 'water' || neighbour.y < cell.y - 1) {
+          ledged = true;
+          break;
+        }
+      }
+      if (ledged) break;
+    }
+    if (ledged || ring < 4) continue;
+
     const spread = Math.max(...heights) - Math.min(...heights);
     // Prefer flat, then slightly raised — a settlement on a rise reads well and
     // drains.
     const score = spread * 4 - cell.y * 0.1;
     if (best === null || score < best.score) {
-      best = { position: { x: cell.x, y: cell.y + 1, z: cell.z }, score };
+      // The origin is the ground's own level, not one above it: the blueprint's
+      // base layer replaces the top block of ground rather than stacking on it.
+      // Built one up, the floor became a platform a full step above the dirt,
+      // and wherever the entrance side fell away by one more the doorway needed
+      // a two-block climb the walker rightly refuses — the settlement's only
+      // shelter stood with a door nobody could actually use.
+      best = { position: { x: cell.x, y: cell.y, z: cell.z }, score };
     }
   }
 

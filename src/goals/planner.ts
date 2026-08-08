@@ -220,17 +220,29 @@ export function ruleGoalChoice(context: PlanningContext): GoalChoice {
 }
 
 function shelterGoal(context: PlanningContext, reason: string): GoalChoice {
+  // A shelter that already stands answers the need directly: go inside. The
+  // need only fires at night or in danger (by day an unsheltered settler sits
+  // at 0.5, above concern), and being inside eases it — so this sends settlers
+  // home to sleep, not into a huddle. What it must never do is build a second
+  // hut: every dusk used to re-site a fresh shelter near the centre and wipe
+  // the standing walls with clear_site to make room for it — a nightly
+  // demolition of the settlement's only shelter, recorded as construction.
+  if (context.existingStructures.includes('shelter') || context.knownShelter !== null) {
+    return {
+      goal: 'seek_shelter',
+      reason,
+      priority: 0.85,
+      resource: null,
+      quantity: null,
+      blueprint: null,
+    };
+  }
+
   // Someone else has already taken on building a roof. Supplying them beats
   // starting a rival hut on the same flat patch: five settlers who each answer
   // "I need shelter" with "so I shall build one" spend the run fighting over the
   // same ground, which is what a 400-round run did — 44 of its last 50 failures
   // were settlers colliding on one reservation.
-  //
-  // Note what this deliberately does *not* do: send the agent to a shelter that
-  // already stands. Tried that, and all five converged on one hut, stopped
-  // exploring, and starved — the settlement collapsed into a single point. A
-  // personal need is answered by working toward shelter, not by everyone walking
-  // to the same door.
   const someoneIsBuilding = context.claimedWork.some(
     (claim) => claim === 'build_structure' || claim.startsWith('build:'),
   );
@@ -473,10 +485,14 @@ function stepsFor(goal: Goal, context: PlanningContext, attempt: number): PlanSt
           searchRadius: 40 + attempt * 60,
         }),
         makeStep(0, 'travel_to', { target: { kind: 'location', location: 'build_site' } }),
-        makeStep(0, 'reserve_region', { region: siteRegion(site) }),
-        makeStep(0, 'clear_site', { region: siteRegion(site) }),
-        makeStep(0, 'place_blueprint', { blueprint: params.blueprint, origin: site }),
-        makeStep(0, 'verify_structure', { blueprint: params.blueprint, origin: site }),
+        // Everything from here acts on the ground select_site actually claimed —
+        // `site` is only the search anchor. Building on the anchor stacked every
+        // structure onto the settlement centre and demolished the standing
+        // shelter each time a new goal cleared the centre to rebuild on it.
+        makeStep(0, 'reserve_region', { region: siteRegion(site), at: 'build_site' }),
+        makeStep(0, 'clear_site', { region: siteRegion(site), at: 'build_site' }),
+        makeStep(0, 'place_blueprint', { blueprint: params.blueprint, origin: site, at: 'build_site' }),
+        makeStep(0, 'verify_structure', { blueprint: params.blueprint, origin: site, at: 'build_site' }),
         makeStep(0, 'release_region', { region: siteRegion(site) }),
       ];
     }

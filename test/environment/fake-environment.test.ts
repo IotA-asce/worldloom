@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { AgentView } from '../../src/agents/agent.ts';
+import { SMALL_SHELTER } from '../../src/civilization/blueprints.ts';
 import type { AgentId } from '../../src/core/ids.ts';
 import { expect } from '../../src/core/result.ts';
 import { horizontalDistance, position, regionVolume, type Blueprint, type Region } from '../../src/core/world.ts';
@@ -279,6 +280,50 @@ describe('movement is constrained by real terrain', () => {
       // The failure must say where, so the agent can learn from it.
       assert.ok(result.failure.observed !== undefined);
     }
+  });
+
+  it('admits an agent through the door of a hut built flush with the ground', async () => {
+    // The mechanics behind a soak's worst failure mode: 509 abandoned
+    // seek_shelter goals, all ending PATH_BLOCKED at the shelter wall. A hut
+    // whose floor stacks *on* the ground is a one-block step up on the flat —
+    // but a two-block climb wherever the door side falls away by one, and the
+    // walker rightly refuses that. Built flush (the floor replaces the top
+    // block of ground), the doorway never asks more than one honest step.
+    const env = await connected(flatEnvironment());
+    const ground = env.world.terrainHeight(0, 0);
+
+    // Even the flat world grows forest where its noise puts it, so find a
+    // patch with no trees over the footprint or the approach.
+    let origin = null as ReturnType<typeof position> | null;
+    for (let ox = 0; ox < 400 && origin === null; ox += 8) {
+      let clear = true;
+      for (let dx = -2; dx <= 6 && clear; dx++) {
+        for (let dz = -4; dz <= 6 && clear; dz++) {
+          if (env.world.surfaceHeight(ox + dx, 24 + dz) !== ground) clear = false;
+        }
+      }
+      if (clear) origin = position(ox, ground, 24);
+    }
+    assert.ok(origin !== null, 'the flat world should have open ground somewhere');
+
+    expect(await env.build(agentAt(origin.x + 2, origin.y + 1, origin.z + 2), SMALL_SHELTER, origin), 'build');
+
+    // The door side falls away by one: every column the doorway can be stepped
+    // from stands one below the floor, so entry is a step up of exactly one.
+    // (Were the floor stacked on the ground instead, this same approach would
+    // demand two — the climb the soak's settlers kept being refused.)
+    for (let dx = -1; dx <= 5; dx++) {
+      for (let dz = -3; dz <= -1; dz++) {
+        env.world.removeBlock(position(origin.x + dx, origin.y, origin.z + dz));
+      }
+    }
+
+    const doorX = origin.x + 2;
+    const start = agentAt(doorX, origin.y + 1, origin.z - 4);
+    const inside = position(doorX, origin.y + 1, origin.z + 2);
+    const walked = expect(await env.moveAgent(start, inside), 'walk in');
+
+    assert.ok(walked.arrived, `the doorway refused entry — stopped at ${JSON.stringify(walked.to)}`);
   });
 });
 

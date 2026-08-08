@@ -57,10 +57,16 @@ export interface ActionParams {
   /** `from` is resolved from the agent's known resources when absent. */
   harvest_resource: { resource: ResourceKind; quantity: number; from?: Region };
   select_site: { blueprint: string; near?: Position; searchRadius: number };
-  reserve_region: { region: Region };
-  clear_site: { region: Region };
-  place_blueprint: { blueprint: string; origin: Position };
-  verify_structure: { blueprint: string; origin: Position };
+  /**
+   * The steps after siting take `at: 'build_site'` to act on the ground the
+   * plan's own select_site step claimed — resolved from the agent's knowledge
+   * at execution time. The `region`/`origin` fields remain as the serialised
+   * fallback for plans written before the threading existed.
+   */
+  reserve_region: { region: Region; at?: 'build_site' };
+  clear_site: { region: Region; at?: 'build_site' };
+  place_blueprint: { blueprint: string; origin: Position; at?: 'build_site' };
+  verify_structure: { blueprint: string; origin: Position; at?: 'build_site' };
   release_region: { region: Region };
   deposit_resources: { resource?: ResourceKind };
   send_message: { toAgentId: AgentId; content: string };
@@ -136,6 +142,16 @@ export function markStepActive(plan: Plan, index: number): Plan {
   const step = plan.steps[index];
   if (step === undefined) return plan;
   return withStep(plan, index, { status: 'active', attempts: step.attempts + 1 });
+}
+
+/**
+ * The step demonstrably progressed this tick, so its attempt count starts
+ * over: attempts measure *stalling*, and a step covering ground is not
+ * stalling. Without this, any journey longer than the stall ceiling was
+ * declared blocked mid-stride.
+ */
+export function noteStepProgress(plan: Plan, index: number): Plan {
+  return withStep(plan, index, { attempts: 1 });
 }
 
 /**
