@@ -11,16 +11,16 @@ Minecraft is the first environment Worldloom plugs into. It is not what
 Worldloom is about; it is simply somewhere visible for these processes to
 happen.
 
-> **Status: M1 — the vertical slice runs.** Agents observe a world, set
-> themselves goals, plan, gather verified resources, build and verify
-> structures, remember what happened, replan when they fail, and resume after a
-> restart. It runs against an in-memory world with no API key
-> (`npm test`), and against a live Minecraft server via `minecraft-mcp`.
+> **Status: V0 runs, end to end.** Five agents observe a world, set themselves
+> goals, plan, gather verified resources, found a settlement, build and verify
+> structures together, talk, remember what happened, replan when they fail, and
+> resume after a restart — and the run ends in a chronicle whose every sentence
+> cites the ledger. All seven V0 success criteria run as one acceptance test
+> (`node --test --import tsx test/v0-acceptance.test.ts`), and the whole thing
+> works with **no API key** via the rule-based provider.
 >
-> Not yet done: memory consolidation and reflection (M2), the concurrent
-> scheduler, messaging and relationships (M3), settlement projects and
-> coordination (M4) — five agents currently each build their own shelter instead
-> of one together — and the chronicle (M6). See
+> The honest numbers, including what still doesn't work, are in
+> [docs/results.md](docs/results.md); the milestone history is in
 > [docs/v0-plan.md](docs/v0-plan.md).
 
 ## Why it exists
@@ -114,6 +114,13 @@ npm install
 npm test          # full simulation, fake environment, no API key, no Minecraft
 ```
 
+The fastest way to watch a civilization run — no server, no key, no spend,
+about ten minutes for thirty days:
+
+```bash
+npm run dev -- run --config scenarios/first-settlement.yaml
+```
+
 Against a real world, start the Paper server from `minecraft-mcp` first:
 
 ```bash
@@ -132,19 +139,18 @@ to watch — but do not point an MCP harness at the same server while Worldloom 
 running: the bridge accepts one client and the newest connection kicks the older
 one.
 
-Inspect a running or finished civilization:
+Inspect a running or finished civilization (point `--config` at whatever the
+run used):
 
 ```bash
-npm run dev -- inspect              # agents, goals, plans, current activity
-npm run dev -- why mira             # the decision trail behind her last choices
-npm run dev -- events --day 4
-npm run dev -- chronicle
-npm run dev -- costs                # tokens and spend by category and agent
+npm run dev -- inspect --config scenarios/first-settlement.yaml
+npm run dev -- why mira --config scenarios/first-settlement.yaml
+npm run dev -- events --day 4 --config scenarios/first-settlement.yaml
+npm run dev -- chronicle --generate --config scenarios/first-settlement.yaml
+npm run dev -- costs --config scenarios/first-settlement.yaml
 ```
 
 ## Example output
-
-The shape V0 is built to produce (illustrative — not a recorded run):
 
 Real output from a rule-based run (no model calls), lightly trimmed:
 

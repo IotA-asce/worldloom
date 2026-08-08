@@ -1,0 +1,29 @@
+# The First Settlement demo, exactly as the results in docs/results.md were
+# produced: five settlers, the in-memory-fidelity fake environment, and the
+# rule-based provider — no Minecraft server, no API key, no spend.
+#
+#   npm run dev -- run --config scenarios/first-settlement.yaml
+#
+# Thirty days takes about ten minutes. Stop it early with Ctrl-C if you like;
+# the world resumes where it left off on the next run.
+
+simulation:
+  scenario: first-settlement
+  agents: 5
+  tick_interval_seconds: 0
+  max_days: 30
+  seed: 3
+
+environment:
+  type: fake
+
+reasoning:
+  provider: heuristic
+
+persistence:
+  database: ./worldloom-first-settlement.db
+
+logging:
+  level: warn
+  format: pretty
+  record_decisions: true

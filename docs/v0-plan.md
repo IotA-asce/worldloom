@@ -54,7 +54,7 @@ five agents each build their own shelter rather than one together (M4's
 coordination), and food supply is tight enough that agents spend a lot of the
 day foraging (M5's economy tuning).
 
-### M2 — Memory
+### M2 — Memory *(done)*
 
 Episodic and semantic memory, selective retrieval scoring, consolidation into
 higher-level beliefs, importance decay.
@@ -62,7 +62,14 @@ higher-level beliefs, importance decay.
 **Done when:** an agent that failed at a location earlier avoids or adapts to it
 later, and the `decisions` row proves the memory was retrieved and used.
 
-### M3 — Five agents
+Proven by `test/memory/past-failure.test.ts`: the failures at the ridge outrank
+newer, louder memories when Mira faces the same decision again, stay out of the
+way when she is deciding about something else, appear verbatim in the prompt she
+is given, and are named on the `decisions` row. A second suite shows the lesson
+surviving consolidation: the episodes fade, the belief formed from them still
+warns her — and a settler who was never there is told nothing.
+
+### M3 — Five agents *(done)*
 
 Scheduler with interleaved ticks and concurrency cap, region reservations,
 per-agent knowledge isolation, messaging as events, relationships.
@@ -72,7 +79,7 @@ another, and the recipient's `known_resources` gains a row sourced
 `told_by:<id>`; a helpful act moves a relationship value and the event explains
 why.
 
-### M4 — Goals, projects, division of labor
+### M4 — Goals, projects, division of labor *(done)*
 
 Settlement state, structures, projects with requirements and claims,
 coordination so agents pick different work, failure-driven replanning.
@@ -81,7 +88,14 @@ coordination so agents pick different work, failure-driven replanning.
 without a central scheduler assigning them, and a blocked plan recovers
 unattended.
 
-### M5 — Settlement
+Emergent coordination works at five agents — R6 answered with evidence, no
+central work-board needed. What it took: `claimedWork` must see *active goals*,
+not just project claims, or the "someone is already building" check is always
+false and the deposit half of the economy goes silent. Site selection claims
+its ground in the same transaction as the decision, or five settlers site five
+structures onto one footprint.
+
+### M5 — Settlement *(done)*
 
 Blueprints and the builder (ported chunked-fill/verify logic), resource
 acquisition, food, shelter, storage.
@@ -89,7 +103,11 @@ acquisition, food, shelter, storage.
 **Done when:** a shelter and a storage structure exist in the world, are
 recorded as `Structure` rows, and were paid for from the resource ledger.
 
-### M6 — Chronicle
+The shelter half is proven by every soak and the acceptance suite. See
+`docs/results.md` for the honest state of storage and the farm — siting past
+the first structure was the last thing fixed, and the numbers live there.
+
+### M6 — Chronicle *(done)*
 
 Importance classification, the select→render→narrate→verify pipeline.
 
@@ -97,12 +115,20 @@ Importance classification, the select→render→narrate→verify pipeline.
 to a real event; the verifier is proven by a test that feeds it a fabricated
 sentence and sees it rejected.
 
-### M7 — Observability
+One tuning lesson: a discovery is routine the second time. `resource_discovered`
+earns 0.85 only the first time a resource kind is ever found; otherwise a month
+of coal finds fills the chronicle and crowds out the founding.
+
+### M7 — Observability *(done)*
 
 `worldloom inspect`, `events`, `why`, `costs`; structured logging; live status.
 
 **Done when:** a developer can answer "what is each agent doing and why" and
 "what did this run cost" from the CLI alone.
+
+Every CLI command reads observability view models — `civilizationView`,
+`agentView`, `causalChains`, `explainEvent`, `failureView`, `costView`,
+`liveFeedView` — and nothing else. The CLI holds no queries of its own.
 
 ### M8 — First Settlement demo
 
@@ -194,10 +220,13 @@ Independently reviewable units, sized at roughly one focused sitting each.
 
 ## Open questions
 
-- **Does emergent coordination actually work at five agents?** R6's real
-  answer. Decided by M4 evidence, not in advance.
-- **Is heuristic-only play interesting enough to be the default demo?** If so
-  it becomes the zero-cost onboarding path; if not, it stays a test fixture.
+- **Does emergent coordination actually work at five agents?** Answered in M4:
+  yes, once claims reflect active goals and siting claims its ground atomically.
+  No central scheduler was needed.
+- **Is heuristic-only play interesting enough to be the default demo?** Yes —
+  the acceptance suite and every soak in `docs/results.md` ran rule-based, with
+  no model and no API key. It is the zero-cost onboarding path; the Anthropic
+  provider is the upgrade, not the requirement.
 - **Should we upstream a bulk block query and a block-change event to
   `minecraft-mcp`?** Both would materially help. Deferred until V0 proves the
   need with measurements.
