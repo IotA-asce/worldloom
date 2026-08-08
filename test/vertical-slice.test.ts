@@ -17,16 +17,37 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { tickAgent } from '../src/agents/runtime.ts';
+import type { AgentView } from '../src/agents/agent.ts';
 import { defaultConfig, parseConfig, type WorldloomConfig } from '../src/core/config.ts';
 import { sequentialIdFactory } from '../src/core/ids.ts';
-import { expect } from '../src/core/result.ts';
-import { position } from '../src/core/world.ts';
+import { expect, fail, type Result } from '../src/core/result.ts';
+import { position, type Region, type ResourceKind } from '../src/core/world.ts';
 import { FakeEnvironment } from '../src/environment/fake/environment.ts';
+import type { HarvestResult } from '../src/environment/port.ts';
 import { HeuristicProvider } from '../src/reasoning/heuristic.ts';
 import { agentOwner } from '../src/persistence/repositories/ledger.ts';
 import { Store } from '../src/persistence/store.ts';
 import { silentLogger } from '../src/observability/logger.ts';
 import { Simulation } from '../src/simulation.ts';
+
+/**
+ * A world whose resources are real but unusable: observation still reports the
+ * forest, but every harvest fails verification. Used to make failure certain —
+ * a test about how the planner responds to failure should not depend on a
+ * given seed happening to starve the agent.
+ */
+class BarrenEnvironment extends FakeEnvironment {
+  override async harvest(
+    _agent: AgentView,
+    _region: Region,
+    resource: ResourceKind,
+    maxBlocks: number,
+  ): Promise<Result<HarvestResult>> {
+    return fail('VERIFICATION_FAILED', `the ${resource} proved unusable — none verified`, {
+      observed: { attempted: maxBlocks },
+    });
+  }
+}
 
 function testConfig(overrides: Record<string, unknown> = {}): WorldloomConfig {
   return expect(
@@ -158,9 +179,6 @@ describe('one agent, end to end', () => {
 
     for (let i = 0; i < 260; i++) await tickAgent(agent.id, tickDeps(simulation));
 
-    const wood = store.ledger.quantity(agentOwner(agent.id), 'wood');
-    assert.ok(wood > 0, 'the agent should have gathered timber from a real forest');
-
     // Every credit is backed by an event that cites its verification.
     const harvests = store.events
       .query({ types: ['resource_collected'] })
@@ -170,6 +188,15 @@ describe('one agent, end to end', () => {
       const payload = harvest.payload as { quantity: number; verifiedSample: number };
       assert.ok(payload.verifiedSample > 0);
     }
+
+    // 'Gathered' means the ledger credited her — she may since have spent the
+    // wood on the shelter or handed it to the settlement store, so her balance
+    // at an arbitrary tick can honestly be zero.
+    const credited = harvests.reduce(
+      (total, event) => total + (event.payload as { quantity: number }).quantity,
+      0,
+    );
+    assert.ok(credited > 0, 'the agent should have gathered timber from a real forest');
 
     // And a gather goal actually completed, rather than being abandoned.
     const completed = store.events
@@ -229,8 +256,12 @@ describe('one agent, end to end', () => {
 describe('failure is surfaced and recovered from', () => {
   it('replans rather than repeating an impossible step', async () => {
     const store = Store.openMemory(sequentialIdFactory());
-    // A flat world with no trees and no forage: gathering wood must fail.
-    const environment = new FakeEnvironment({ seed: 1, amplitude: 0, ticksPerQuery: 200 });
+    // A world whose wood is real but unusable: every harvest fails at the
+    // verification boundary, whatever the agent believes going in. Forcing the
+    // failure in the environment — rather than hoping a given seed happens to
+    // starve the agent — keeps this test about the planner's response to
+    // failure instead of about terrain luck.
+    const environment = new BarrenEnvironment({ seed: 1, amplitude: 0, ticksPerQuery: 200 });
     const simulation = Simulation.create({
       config: testConfig(),
       store,
@@ -246,7 +277,7 @@ describe('failure is surfaced and recovered from', () => {
     for (let i = 0; i < 60; i++) await tickAgent(agent.id, tickDeps(simulation));
 
     const failures = store.events.query({ types: ['action_failed'] });
-    assert.ok(failures.length > 0, 'a treeless world should produce real failures');
+    assert.ok(failures.length > 0, 'an unusable forest should produce real failures');
 
     // Failure reached the planner: either the plan was revised or the goal was
     // given up. Silently retrying forever is the behaviour this rules out.

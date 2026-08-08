@@ -533,6 +533,7 @@ async function selectSite(
     blueprint.size.width,
     blueprint.size.depth,
     (footprint) => groundIsTaken(ctx, footprint),
+    survey.value.resolution,
   );
   if (site === null) {
     return fail('TARGET_CHANGED', 'no free, flat, dry ground here to build on', {
@@ -1002,11 +1003,26 @@ function chooseFlattestSite(
   width: number,
   depth: number,
   taken: (footprint: Region) => boolean = () => false,
+  resolution = 1,
 ): Position | null {
   if (cells.length === 0) return null;
 
   const byKey = new Map<string, SurveyCell>();
   for (const cell of cells) byKey.set(`${cell.x},${cell.z}`, cell);
+
+  // Probe the footprint's corners and middle — but only where the survey
+  // actually sampled. A probe offset that lands between sampled columns is
+  // silently skipped, and once the survey coarsens past resolution 2 the raw
+  // offsets (0, half, full) mostly *don't* land on the grid: every footprint
+  // probed fewer than four real heights and the whole search came back null,
+  // however flat the terrain. Snap the offsets to the sampling grid instead.
+  const step = Math.max(1, resolution);
+  const probeOffsets = (span: number): number[] => {
+    const onGrid = (blocks: number): number => Math.round(blocks / step) * step;
+    return [...new Set([0, onGrid(span / 2), onGrid(span)])];
+  };
+  const xOffsets = probeOffsets(width);
+  const zOffsets = probeOffsets(depth);
 
   let best: { position: Position; score: number } | null = null;
 
@@ -1015,9 +1031,8 @@ function chooseFlattestSite(
 
     const heights: number[] = [];
     let dry = true;
-    // Sample the footprint's corners and middle rather than every block.
-    for (const dx of [0, Math.floor(width / 2), width]) {
-      for (const dz of [0, Math.floor(depth / 2), depth]) {
+    for (const dx of xOffsets) {
+      for (const dz of zOffsets) {
         const neighbour = byKey.get(`${cell.x + dx},${cell.z + dz}`);
         if (neighbour === undefined) continue;
         if (neighbour.surface === 'water') dry = false;

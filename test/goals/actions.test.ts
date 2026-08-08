@@ -58,12 +58,7 @@ function buildGoal(agentId: AgentId): Goal {
 }
 
 describe('select_site', () => {
-  it('still surveys when the search has widened past the fine-resolution limit', async () => {
-    // The siting search widens by 60 blocks per attempt. At a fixed resolution
-    // of 2, a radius past ~120 blocks asks the environment for more cells than
-    // a survey may return — so the late attempts of a long search failed
-    // BAD_ARGS without ever looking at the ground. A 30-day soak showed exactly
-    // that: seven survey refusals, all from one settler, all at attempt ≥ 2.
+  async function selectSiteAt(searchRadius: number) {
     const store = Store.openMemory(sequentialIdFactory());
     store.simulation.initialise('siting-test', 1, 1_700_000_000_000);
     const agent = makeAgent('agent_000001' as AgentId);
@@ -75,12 +70,7 @@ describe('select_site', () => {
       {
         index: 0,
         action: 'select_site',
-        params: {
-          blueprint: 'small_shelter',
-          near: position(0, 64, 0),
-          // Attempt-4 radius: far past the point where resolution 2 breaks.
-          searchRadius: 280,
-        },
+        params: { blueprint: 'small_shelter', near: position(0, 64, 0), searchRadius },
         status: 'active',
         attempts: 1,
         failure: null,
@@ -94,6 +84,16 @@ describe('select_site', () => {
         time: store.simulation.currentTime(),
       },
     );
+    return { result, store, environment, agent };
+  }
+
+  it('still surveys when the search has widened past the fine-resolution limit', async () => {
+    // The siting search widens by 60 blocks per attempt. At a fixed resolution
+    // of 2, a radius past ~120 blocks asks the environment for more cells than
+    // a survey may return — so the late attempts of a long search failed
+    // BAD_ARGS without ever looking at the ground. A 30-day soak showed exactly
+    // that: seven survey refusals, all from one settler, all at attempt ≥ 2.
+    const { result, store, environment, agent } = await selectSiteAt(280);
 
     assert.ok(result.ok, `a wide survey should be sampled coarsely, not refused: ${
       result.ok === false ? result.failure.detail : ''
@@ -104,6 +104,24 @@ describe('select_site', () => {
       1,
       'the site it chose is somewhere it can walk back to',
     );
+
+    await environment.disconnect();
+    store.close();
+  });
+
+  it('still finds ground when the coarse survey no longer matches the footprint probe', async () => {
+    // Coarsening exposed a quieter bug: the footprint probe looked up exact
+    // coordinates (0, half, full) in the sampled grid, and past resolution 2
+    // those offsets mostly land *between* samples. Every footprint probed fewer
+    // than four real heights, so the search returned null however flat the
+    // terrain — the widened search failed TARGET_CHANGED on open ground.
+    // Radius 160 samples at resolution 3, where not one raw offset lands.
+    const { result, store, environment } = await selectSiteAt(160);
+
+    assert.ok(result.ok, `probes must snap to the survey grid: ${
+      result.ok === false ? result.failure.detail : ''
+    }`);
+    assert.match(result.value.note ?? '', /chose a site/);
 
     await environment.disconnect();
     store.close();
