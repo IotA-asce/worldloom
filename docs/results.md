@@ -94,6 +94,10 @@ a fabricated sentence to prove the rejection path works.
   the founding flurry crosses the importance bar, steady work does not. Nothing
   invented is the floor, not the ceiling — V1 should tune importance so a
   month of labour reads like more than a footnote.
+  A subsequent CLI improvement exposes `chronicle --generate --threshold 0.3
+  --cite` for inspecting routine work with ledger citations. Automatic
+  importance tuning and a new month-long comparison remain outstanding; the
+  original soak results above have not been rerun or replaced.
 - **The Minecraft adapter is unproven at this scale.** Every number above is
   from the in-memory environment. The adapter is built and unit-tested against
   a mock bridge, but no thirty-day run has yet executed against a live server;

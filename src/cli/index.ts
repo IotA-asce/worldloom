@@ -59,6 +59,7 @@ Options:
   --limit <n>       Rows to show (default 20)
   --day <n>         Filter to one day
   --generate        chronicle: write entries from the ledger before reading
+  --threshold <n>   chronicle --generate: pin importance to 0..1 (default: automatic)
   --cite            chronicle: show the event ids each entry was built from
   --verbose         Show more of each record
 `;
@@ -553,6 +554,20 @@ function cmdMemories(args: Args): void {
 }
 
 async function cmdChronicle(args: Args): Promise<void> {
+  const rawThreshold = args.flags.threshold;
+  let threshold: number | undefined;
+  if (rawThreshold !== undefined) {
+    if (args.flags.generate !== true) {
+      throw new Error('--threshold requires chronicle --generate');
+    }
+    if (typeof rawThreshold !== 'string' || rawThreshold.trim() === '') {
+      throw new Error('--threshold requires a finite number from 0 to 1');
+    }
+    threshold = Number(rawThreshold);
+    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+      throw new Error('--threshold requires a finite number from 0 to 1');
+    }
+  }
   const config = resolveConfig(args);
   const store = openStore(config);
 
@@ -561,11 +576,13 @@ async function cmdChronicle(args: Args): Promise<void> {
     // opt-in: reading is free, and writing history is a deliberate act.
     const selection = createReasoningProvider({ config });
     out(`  Writing the chronicle — ${selection.reason}`);
+    if (threshold !== undefined) out(`  Importance threshold pinned to ${String(threshold)}.`);
     const day = args.flags.day === undefined ? undefined : numberFlag(args, 'day', 0);
     const generated = await generateChronicle(
       { store, reasoning: selection.provider },
       {
         narrate: config.reasoning.provider !== 'heuristic',
+        ...(threshold === undefined ? {} : { threshold }),
         ...(day === undefined ? {} : { fromDay: day, toDay: day }),
       },
     );

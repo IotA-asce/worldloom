@@ -153,6 +153,22 @@ npm run dev -- chronicle --generate --config scenarios/first-settlement.yaml
 npm run dev -- costs --config scenarios/first-settlement.yaml
 ```
 
+To include routine work that the automatic chronicle omits, regenerate with an
+explicit importance threshold and inspect the supporting ledger events:
+
+```bash
+npm run dev -- chronicle --generate --threshold 0.3 --cite --config scenarios/first-settlement.yaml
+```
+
+`--threshold` takes a finite number from 0 to 1 and requires `--generate`.
+Omitting it keeps the automatic, volume-sensitive selection. A lower value
+includes less prominent events; the existing 24-fact daily cap still applies,
+and always-notable events survive any threshold. Generation replaces entries
+for days with selected facts; days with no selected facts retain any existing
+entry. It never changes the event ledger. Use `--day N` to limit regeneration
+to one day. Generation uses the configured reasoning provider; choose
+`WORLDLOOM_PROVIDER=heuristic` for deterministic prose without model calls.
+
 ## Example output
 
 Real output from a rule-based run (no model calls), lightly trimmed:
