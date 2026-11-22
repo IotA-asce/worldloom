@@ -499,6 +499,11 @@ function stepsFor(goal: Goal, context: PlanningContext, attempt: number): PlanSt
 
     case 'find_food': {
       const params = goal.params as GoalParams['find_food'];
+      // Satisfy hunger from verified personal inventory before risking another search.
+      // The executor checks/debits the live ledger, so a stale plan cannot create food.
+      if (bundleGet(context.carrying, 'food') > 0) {
+        return [makeStep(0, 'eat', { amount: Math.min(params.quantity, 4) })];
+      }
       return [
         ...(attempt > 0
           ? [

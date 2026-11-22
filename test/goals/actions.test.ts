@@ -19,6 +19,7 @@ import { position } from '../../src/core/world.ts';
 import { flatEnvironment } from '../../src/environment/fake/environment.ts';
 import { executeStep } from '../../src/goals/actions.ts';
 import type { Goal } from '../../src/goals/goal.ts';
+import { buildPlan, type PlanningContext } from '../../src/goals/planner.ts';
 import { agentOwner } from '../../src/persistence/repositories/ledger.ts';
 import { Store } from '../../src/persistence/store.ts';
 
@@ -270,5 +271,71 @@ describe('select_site', () => {
 
     await environment.disconnect();
     store.close();
+  });
+});
+
+
+describe('find_food uses food already carried before searching', () => {
+  function foodContext(agent: Agent, food: number, store: Store): PlanningContext {
+    return {
+      agent, time: store.simulation.currentTime(), knownResources: [], knownShelter: null,
+      settlementCenter: null, carrying: food > 0 ? { food } : {}, memories: [], claimedWork: [],
+      existingStructures: [], sharedStore: null, work: null, sheltered: false, hostilesNearby: 0,
+    };
+  }
+
+  for (const { supply, quantity, eaten } of [
+    { supply: 5, quantity: 6, eaten: 4 },
+    { supply: 1, quantity: 6, eaten: 1 },
+    { supply: 5, quantity: 1, eaten: 1 },
+  ]) {
+    it(`eats ${eaten} from ${supply} carried food with goal quantity ${quantity}`, async () => {
+      const ids = sequentialIdFactory();
+      const store = Store.openMemory(ids);
+      store.simulation.initialise('carried-food-fixture', 1, 1_700_000_000_000);
+      const agent = { ...makeAgent('agent_000001' as AgentId),
+        needs: { ...STARTING_NEEDS, food: 0.2 } };
+      store.agents.insert(agent);
+      // Explicit fixture inventory, not a simulated harvest or production credit.
+      store.ledger.credit(agentOwner(agent.id), { food: supply });
+      const environment = flatEnvironment();
+      await environment.connect();
+      try {
+        const goal: Goal = { ...buildGoal(agent.id), kind: 'find_food', params: { quantity } };
+        const context = foodContext(agent, supply, store);
+        const plan = buildPlan(goal, context, ids);
+        assert.deepEqual(plan.steps.map((step) => step.action), ['eat']);
+        const step = plan.steps[0];
+        assert.ok(step);
+        const result = await executeStep(step, { store, environment, agent, goal, time: context.time });
+        assert.ok(result.ok);
+        assert.equal(store.ledger.quantity(agentOwner(agent.id), 'food'), supply - eaten);
+        assert.ok(Math.abs((result.value.agentPatch?.needs?.food ?? 0) - (0.2 + eaten * 0.15)) < 1e-10);
+        const events = store.events.query({ types: ['resource_spent'] });
+        assert.equal(events.length, 1);
+        assert.deepEqual(events[0]?.payload, { agentId: agent.id, resources: { food: eaten }, reason: 'eating' });
+        assert.equal(store.events.query({ types: ['resource_collected'] }).length, 0);
+      } finally {
+        await environment.disconnect();
+        store.close();
+      }
+    });
+  }
+
+  it('keeps discovery and changed-ground retry plans when inventory is empty', () => {
+    const ids = sequentialIdFactory();
+    const store = Store.openMemory(ids);
+    store.simulation.initialise('empty-food-fixture', 1, 1_700_000_000_000);
+    try {
+      const agent = makeAgent('agent_000001' as AgentId);
+      const context = foodContext(agent, 0, store);
+      const goal: Goal = { ...buildGoal(agent.id), kind: 'find_food', params: { quantity: 6 } };
+      assert.deepEqual(buildPlan(goal, context, ids).steps.map((step) => step.action),
+        ['locate_resource', 'travel_to', 'harvest_resource', 'eat']);
+      assert.deepEqual(buildPlan(goal, context, ids, 1).steps.map((step) => step.action),
+        ['travel_to', 'survey_area', 'locate_resource', 'travel_to', 'harvest_resource', 'eat']);
+    } finally {
+      store.close();
+    }
   });
 });

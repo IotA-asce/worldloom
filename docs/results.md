@@ -85,6 +85,12 @@ a fabricated sentence to prove the rejection path works.
   the search widens noisily instead of rotating through known grounds. Nobody
   starves (7,102 food in store), but a fifth of all decisions are spent
   re-answering "where did the berries go". This is the clearest V1 target.
+  A 22 November follow-up makes `find_food` consume already-carried personal
+  food before searching again. Fake-environment tests verify the live ledger
+  debit, hunger restoration and spending event, including partial supplies.
+  Empty-inventory foraging/retries remain unchanged. This is a bounded food-flow
+  improvement, not foraging-ground rotation or a new month-long comparison;
+  the historical soak figures above remain unchanged.
 - **One settler still wedges in terrain pockets.** 27 of the last 50 failures
   are Mira, `PATH_BLOCKED` on the same journey across days 29–30. The router
   escapes dead ends and the replanner abandons and retries — she recovers each
