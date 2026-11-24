@@ -88,9 +88,19 @@ a fabricated sentence to prove the rejection path works.
   A 22 November follow-up makes `find_food` consume already-carried personal
   food before searching again. Fake-environment tests verify the live ledger
   debit, hunger restoration and spending event, including partial supplies.
-  Empty-inventory foraging/retries remain unchanged. This is a bounded food-flow
-  improvement, not foraging-ground rotation or a new month-long comparison;
+  At that point empty-inventory foraging/retries remained unchanged. This was a
+  bounded food-flow improvement, not foraging-ground rotation or a new month-long comparison;
   the historical soak figures above remain unchanged.
+  A 24 November follow-up lets an empty-handed agent use its own confident food
+  memory on the first attempt: travel to that source, harvest with existing world
+  verification, then eat from the ledger. It no longer requires food to be visible
+  within 80 blocks of the starting point. Carried food still takes priority;
+  unknown/exhausted beliefs keep local discovery, and later attempts still explore
+  fresh ground. Five fake-environment regressions verify actual world removal,
+  ledger credit/debit, hunger recovery, empty-source correction and fallback plans.
+  This is another bounded food-flow slice: it does not implement rotation among
+  multiple grounds, shared-store retrieval, live-adapter scale validation or a
+  new month-long comparison. The original soak numbers above remain historical.
 - **One settler still wedges in terrain pockets.** 27 of the last 50 failures
   are Mira, `PATH_BLOCKED` on the same journey across days 29–30. The router
   escapes dead ends and the replanner abandons and retries — she recovers each

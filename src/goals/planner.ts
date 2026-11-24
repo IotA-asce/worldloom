@@ -504,6 +504,16 @@ function stepsFor(goal: Goal, context: PlanningContext, attempt: number): PlanSt
       if (bundleGet(context.carrying, 'food') > 0) {
         return [makeStep(0, 'eat', { amount: Math.min(params.quantity, 4) })];
       }
+      // A remembered source may be beyond a local observation. Go there first,
+      // as gather_resource does; harvesting verifies the belief against the world
+      // and corrects it when empty. Later attempts still move to fresh ground.
+      if (attempt === 0 && nearestKnown(context, 'food') !== null) {
+        return [
+          makeStep(0, 'travel_to', { target: { kind: 'resource', resource: 'food' } }),
+          makeStep(0, 'harvest_resource', { resource: 'food', quantity: params.quantity }),
+          makeStep(0, 'eat', { amount: Math.min(params.quantity, 4) }),
+        ];
+      }
       return [
         ...(attempt > 0
           ? [
