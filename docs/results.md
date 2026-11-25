@@ -101,6 +101,16 @@ a fabricated sentence to prove the rejection path works.
   This is another bounded food-flow slice: it does not implement rotation among
   multiple grounds, shared-store retrieval, live-adapter scale validation or a
   new month-long comparison. The original soak numbers above remain historical.
+
+  The 25 November implementation can try a second remembered ground. Travel
+  and harvest keep the same planned coordinates, and terminal failures are
+  read from the goal's persisted plans. A blocked route excludes that ground
+  for the current goal without lowering its food belief. An empty harvest
+  corrects the original belief coordinate. The third plan uses exploration if
+  the agent still has no food. Fake-world tests cover the cap, reopening an
+  active plan, and harvesting and eating from the ledger. The existing gap
+  between saving a failed plan and inserting its replacement remains. Live
+  Minecraft and the effect on the historical foraging rate are still untested.
 - **One settler still wedges in terrain pockets.** 27 of the last 50 failures
   are Mira, `PATH_BLOCKED` on the same journey across days 29–30. The router
   escapes dead ends and the replanner abandons and retries — she recovers each

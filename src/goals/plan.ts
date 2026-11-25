@@ -55,7 +55,13 @@ export interface ActionParams {
   travel_to: { target: TravelTarget };
   locate_resource: { resource: ResourceKind; searchRadius: number };
   /** `from` is resolved from the agent's known resources when absent. */
-  harvest_resource: { resource: ResourceKind; quantity: number; from?: Region };
+  harvest_resource: {
+    resource: ResourceKind;
+    quantity: number;
+    from?: Region;
+    /** The belief a failure should be attributed to, when `from` centres elsewhere. */
+    believedAt?: Position;
+  };
   select_site: { blueprint: string; near?: Position; searchRadius: number };
   /**
    * The steps after siting take `at: 'build_site'` to act on the ground the

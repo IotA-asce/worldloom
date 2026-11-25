@@ -27,7 +27,9 @@ import {
   bundleGet,
   bundleShortfall,
   expandRegion,
+  floorPosition,
   horizontalDistance,
+  positionKey,
   region as makeRegion,
   RESOURCE_KINDS,
   type Position,
@@ -40,7 +42,7 @@ import { asGoalChoice, type WorkRecommendation } from '../civilization/coordinat
 import { STRUCTURE_SEQUENCE } from '../civilization/settlement.ts';
 import type { KnownResource } from '../memory/types.ts';
 import { GOAL_KINDS, type Goal, type GoalParams } from './goal.ts';
-import { makeStep, type Plan, type PlanStep } from './plan.ts';
+import { makeStep, type ActionParams, type Plan, type PlanStep } from './plan.ts';
 
 /** Everything goal selection is allowed to see. Assembled deliberately small —
  *  this is what gets rendered into a prompt (requirement 29). */
@@ -423,8 +425,9 @@ export function buildPlan(
   context: PlanningContext,
   ids: IdFactory,
   attempt = 0,
+  excludedFoodBeliefs: ReadonlySet<string> = new Set(),
 ): Plan {
-  const steps = stepsFor(goal, context, attempt);
+  const steps = stepsFor(goal, context, attempt, excludedFoodBeliefs);
   return {
     id: ids.next('plan') as PlanId,
     goalId: goal.id,
@@ -437,7 +440,12 @@ export function buildPlan(
   };
 }
 
-function stepsFor(goal: Goal, context: PlanningContext, attempt: number): PlanStep[] {
+function stepsFor(
+  goal: Goal,
+  context: PlanningContext,
+  attempt: number,
+  excludedFoodBeliefs: ReadonlySet<string>,
+): PlanStep[] {
   switch (goal.kind) {
     case 'gather_resource': {
       const params = goal.params as GoalParams['gather_resource'];
@@ -505,12 +513,23 @@ function stepsFor(goal: Goal, context: PlanningContext, attempt: number): PlanSt
         return [makeStep(0, 'eat', { amount: Math.min(params.quantity, 4) })];
       }
       // A remembered source may be beyond a local observation. Go there first,
-      // as gather_resource does; harvesting verifies the belief against the world
-      // and corrects it when empty. Later attempts still move to fresh ground.
-      if (attempt === 0 && nearestKnown(context, 'food') !== null) {
+      // as gather_resource does. Until the plan has had its fresh-ground
+      // attempts, rank positive-confidence beliefs and aim at one specific
+      // position, so a correction lands on the belief that failed.
+      // Attempt 2 and later fall through to the existing fresh-ground search.
+      const remembered = (attempt === 0 || attempt === 1)
+        ? nearestPositiveFood(context, excludedFoodBeliefs)
+        : null;
+      if (remembered !== null) {
+        const at = floorPosition(remembered.position);
         return [
-          makeStep(0, 'travel_to', { target: { kind: 'resource', resource: 'food' } }),
-          makeStep(0, 'harvest_resource', { resource: 'food', quantity: params.quantity }),
+          makeStep(0, 'travel_to', { target: { kind: 'position', position: at } }),
+          makeStep(0, 'harvest_resource', {
+            resource: 'food',
+            quantity: params.quantity,
+            from: regionAround(at),
+            believedAt: at,
+          }),
           makeStep(0, 'eat', { amount: Math.min(params.quantity, 4) }),
         ];
       }
@@ -638,6 +657,90 @@ function nearestKnown(context: PlanningContext, resource: ResourceKind): KnownRe
     }
   }
   return best;
+}
+
+/** The same modest search volume harvestResource builds, so a plan can stay
+ *  pinned to one belief instead of letting resolution pick for it. */
+function regionAround(p: Position): { min: Position; max: Position } {
+  return makeRegion(
+    { x: p.x - 12, y: p.y - 6, z: p.z - 12 },
+    { x: p.x + 12, y: p.y + 8, z: p.z + 12 },
+  );
+}
+
+/** Rank personal food beliefs by travel distance, then numerically, skipping
+ *  ground the goal already proved barren or unreachable. */
+function nearestPositiveFood(
+  context: PlanningContext,
+  excluded: ReadonlySet<string>,
+): KnownResource | null {
+  const origin = context.agent.position;
+  let best: KnownResource | null = null;
+  let bestAt: Position | null = null;
+  let bestDistance = Infinity;
+  for (const known of context.knownResources) {
+    if (known.resource !== 'food' || known.confidence <= 0) continue;
+    if (known.agentId !== context.agent.id) continue;
+    const at = floorPosition(known.position);
+    if (excluded.has(positionKey(at))) continue;
+    const distance = horizontalDistance(origin, at);
+    if (
+      bestAt === null ||
+      distance < bestDistance ||
+      (distance === bestDistance && comparePosition(at, bestAt) < 0)
+    ) {
+      bestDistance = distance;
+      best = { ...known, position: at };
+      bestAt = at;
+    }
+  }
+  return best;
+}
+
+function comparePosition(a: Position, b: Position): number {
+  if (a.x !== b.x) return a.x - b.x;
+  if (a.y !== b.y) return a.y - b.y;
+  return a.z - b.z;
+}
+
+/** Extract the believed coordinate a harvest step was pinned to, if any. */
+function foodBeliefKeyOf(step: PlanStep): string | null {
+  if (step.action !== 'harvest_resource') return null;
+  const params = step.params as ActionParams['harvest_resource'];
+  if (params.resource !== 'food' || params.from === undefined) return null;
+  const believedAt = params.believedAt;
+  if (believedAt === undefined) return null;
+  return positionKey(floorPosition(believedAt));
+}
+
+/** Food beliefs the failed plans for a goal discredited: a barren deposit it
+ *  harvested, or a blocked destination it walked to. */
+export function excludedFoodBeliefsFromFailedPlans(
+  goalId: GoalId,
+  history: readonly Plan[],
+): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const plan of history) {
+    if (plan.goalId !== goalId || plan.state !== 'failed') continue;
+    const terminal = plan.steps[plan.currentStep];
+    if (terminal === undefined || terminal.status !== 'failed' || terminal.failure === null) continue;
+    if (terminal.action === 'harvest_resource') {
+      if (terminal.failure.kind !== 'RESOURCE_UNAVAILABLE') continue;
+      const key = foodBeliefKeyOf(terminal);
+      if (key !== null) keys.add(key);
+    } else if (terminal.action === 'travel_to') {
+      if (terminal.failure.kind !== 'PATH_BLOCKED') continue;
+      const params = terminal.params as ActionParams['travel_to'];
+      if (params.target.kind !== 'position') continue;
+      const next = plan.steps[plan.currentStep + 1];
+      if (next === undefined) continue;
+      const key = foodBeliefKeyOf(next);
+      if (key === null) continue;
+      if (key !== positionKey(floorPosition(params.target.position))) continue;
+      keys.add(key);
+    }
+  }
+  return keys;
 }
 
 // ── Replanning ──────────────────────────────────────────────────────────────

@@ -43,6 +43,7 @@ import {
 import {
   buildPlan,
   describeSituation,
+  excludedFoodBeliefsFromFailedPlans,
   goalFromChoice,
   GoalChoiceSchema,
   RecoverySchema,
@@ -612,7 +613,8 @@ async function recoverFrom(
 
   // Goal-level attempts, not step-level: a replan resets the step's counter, so
   // counting steps alone would let a goal loop forever.
-  const planAttempts = deps.store.plans.historyForGoal(goal.id).length;
+  const planHistory = deps.store.plans.historyForGoal(goal.id);
+  const planAttempts = planHistory.length;
 
   const answer = await deps.reasoning.reason({
     category: 'replanning',
@@ -652,9 +654,15 @@ async function recoverFrom(
     // Rebuild from the agent's *current* knowledge, which the failure has just
     // corrected — so the new plan doesn't repeat the same mistake.
     const context = planningContextFromStore(agent, time, deps);
+    // Food beliefs the failed plan itself discredited: a barren belief it
+    // harvested, or the destination that blocked the walk. Exclude those keys
+    // so the fresh plan cannot walk straight back to them.
+    const excludedFoodBeliefs = goal.kind === 'find_food'
+      ? excludedFoodBeliefsFromFailedPlans(goal.id, planHistory)
+      : new Set<string>();
     deps.store.plans.supersedeForGoal(goal.id);
     // The attempt number changes the plan's shape — see buildPlan.
-    const revised = buildPlan(goal, context, deps.store.ids, planAttempts);
+    const revised = buildPlan(goal, context, deps.store.ids, planAttempts, excludedFoodBeliefs);
     deps.store.transaction(() => {
       deps.store.plans.insert(revised);
       deps.store.events.appendAll(

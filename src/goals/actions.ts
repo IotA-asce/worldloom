@@ -407,7 +407,7 @@ async function harvestResource(
   ctx: Ctx,
 ): Promise<Result<StepOutcome>> {
   const target = params.from !== undefined
-    ? { region: params.from, believedAt: regionCenter(params.from) }
+    ? { region: params.from, believedAt: params.believedAt ?? regionCenter(params.from) }
     : harvestRegionFor(params.resource, ctx);
   if (target === null) {
     return fail('RESOURCE_UNAVAILABLE', `I don't know where to find ${params.resource}`, {
